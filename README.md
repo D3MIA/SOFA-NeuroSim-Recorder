@@ -46,7 +46,7 @@ SOFA Simulation → NPZ Export → 3D Projection → CSV Export (Optional) → O
 
 ## File Structure
 
-````
+```
 brain/               
 ├──  Core Simulation Files
 │   ├── brain.py                           # Main SOFA simulation with AnimationRecorder
@@ -66,7 +66,7 @@ brain/
     │   ├── brain_surface_*_projected.npz  # Projected data with pixel coordinates
     │   └── brain_surface_*_projected.csv  # Projected CSV data (optional)
     └── overlayed_frames/                  # Visualization outputs
-
+```
 
 ---
 
@@ -77,7 +77,7 @@ brain/
 ```bash
 # Run SOFA simulation with surface capture
 python brain.py
-````
+```
 
 **What happens:**
 
