@@ -1,0 +1,24 @@
+{
+  "method": "texture_diff_common",
+  "brain_surface": "data/surface_full_decimated.obj",
+  "texture_ref": "data/texture.png",
+  "texture_alt": "data/texture_outpaintr.png",
+  "threshold_high": null,
+  "threshold_low": 0.07671390473842621,
+  "coverage_ratio": 0.13733641641247663,
+  "vertex_count": 40652,
+  "mask_count": 5583,
+  "use_lab": false,
+  "otsu": false,
+  "gauss_sigma": 2.0,
+  "percentile": 90.0,
+  "low_percentile": 25.0,
+  "keep_multiple_components": false,
+  "npz": "data\\craniotomy_region_texture_common.npz",
+  "stats": {
+    "diff_min": 0.0,
+    "diff_max": 1.0,
+    "diff_mean": 0.29006457328796387,
+    "diff_median": 0.2235294133424759
+  }
+}

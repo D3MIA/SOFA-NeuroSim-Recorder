@@ -110,7 +110,7 @@ def estimate_projected_csv_size(npz_file):
     data.close()
     return 0
 
-def convert_projected_npz_to_csv_chunked(npz_file, frames_per_chunk=50):
+def convert_projected_npz_to_csv_chunked(npz_file, frames_per_chunk=50, out_root=None):
     """Conversion NPZ projeté → CSV par chunks"""
 
     print("\nCONVERSION NPZ PROJETE → CSV PAR CHUNKS")
@@ -162,20 +162,22 @@ def convert_projected_npz_to_csv_chunked(npz_file, frames_per_chunk=50):
         # Conversion simple (un seul fichier)
         print(f"Conversion simple ({frames_per_chunk} frames ≥ {n_frames} frames totales)")
         return _convert_single_projected_csv(frames, projected_pixels, visibility_masks, depth_values, 
-                                           times, base_filename, displacements, rest_positions)
+                                           times, base_filename, displacements, rest_positions, out_root=out_root)
     else:
         # Conversion par chunks
         n_chunks = (n_frames // frames_per_chunk) + (1 if n_frames % frames_per_chunk > 0 else 0)
         print(f"Conversion par chunks ({n_chunks} fichiers de {frames_per_chunk} frames chacun)")
         return _convert_chunked_projected_csv(frames, projected_pixels, visibility_masks, depth_values,
-                                            times, base_filename, frames_per_chunk, displacements, rest_positions)
+                                            times, base_filename, frames_per_chunk, displacements, rest_positions, out_root=out_root)
 
 def _convert_single_projected_csv(frames, projected_pixels, visibility_masks, depth_values, times, 
-                                base_filename, displacements=None, rest_positions=None):
+                                base_filename, displacements=None, rest_positions=None, out_root=None):
     """Conversion en un seul fichier CSV avec toutes les données projetées"""
 
-    output_file = f"projected_npz/{base_filename}.csv"
-    os.makedirs("projected_npz", exist_ok=True)
+    if out_root is None:
+        out_root = "projected_npz"
+    os.makedirs(out_root, exist_ok=True)
+    output_file = os.path.join(out_root, f"{base_filename}.csv")
 
     print(f"Écriture: {os.path.basename(output_file)}")
 
@@ -261,7 +263,7 @@ def _convert_single_projected_csv(frames, projected_pixels, visibility_masks, de
     return output_file
 
 def _convert_chunked_projected_csv(frames, projected_pixels, visibility_masks, depth_values, times,
-                                 base_filename, frames_per_chunk, displacements=None, rest_positions=None):
+                                 base_filename, frames_per_chunk, displacements=None, rest_positions=None, out_root=None):
     """Conversion en plusieurs fichiers CSV (chunks) avec données projetées"""
 
     n_frames, n_vertices, _ = frames.shape
@@ -284,13 +286,15 @@ def _convert_chunked_projected_csv(frames, projected_pixels, visibility_masks, d
     output_files = []
     chunk_idx = 0
 
-    os.makedirs("projected_npz", exist_ok=True)
+    if out_root is None:
+        out_root = "projected_npz"
+    os.makedirs(out_root, exist_ok=True)
 
     for start_frame in range(0, n_frames, frames_per_chunk):
         end_frame = min(start_frame + frames_per_chunk, n_frames)
 
         # Nom du chunk
-        chunk_filename = f"projected_npz/{base_filename}_chunk_{chunk_idx:03d}.csv"
+        chunk_filename = os.path.join(out_root, f"{base_filename}_chunk_{chunk_idx:03d}.csv")
 
         chunk_frame_count = end_frame - start_frame
         chunk_row_count = chunk_frame_count * n_vertices
@@ -374,7 +378,7 @@ def _convert_chunked_projected_csv(frames, projected_pixels, visibility_masks, d
         gc.collect()
 
     # Création d'un fichier index
-    index_file = f"projected_npz/{base_filename}_INDEX.txt"
+    index_file = os.path.join(out_root, f"{base_filename}_INDEX.txt")
     with open(index_file, 'w') as f:
         f.write(f"Conversion NPZ projeté → CSV par chunks\n")
         f.write(f"=======================================\n")
@@ -401,13 +405,17 @@ def smart_projected_conversion_menu():
     print("CONVERSION INTELLIGENTE NPZ PROJETE → CSV")
     print("=" * 60)
 
-    # Recherche fichiers NPZ projetés
-    export_dir = "projected_npz"
-    if not os.path.exists(export_dir):
-        print(f"Dossier {export_dir} introuvable")
+    # Recherche fichiers NPZ projetés (récursive)
+    export_root = "projected_npz"
+    if not os.path.exists(export_root):
+        print(f"Dossier {export_root} introuvable")
         return
 
-    npz_files = [f for f in os.listdir(export_dir) if f.endswith('.npz') and 'projected' in f]
+    npz_files = []
+    for root, _dirs, files in os.walk(export_root):
+        for fn in files:
+            if fn.endswith('.npz') and 'projected' in fn:
+                npz_files.append(os.path.join(root, fn))
 
     if not npz_files:
         print("Aucun fichier NPZ projeté trouvé")
@@ -416,17 +424,18 @@ def smart_projected_conversion_menu():
         # Fallback: chercher dans simulation_output
         fallback_dir = "simulation_output"
         if os.path.exists(fallback_dir):
-            fallback_files = [f for f in os.listdir(fallback_dir) if f.endswith('.npz') and 'projected' in f]
-            if fallback_files:
+            fallback_paths = []
+            for f in os.listdir(fallback_dir):
+                if f.endswith('.npz') and 'projected' in f:
+                    fallback_paths.append(os.path.join(fallback_dir, f))
+            if fallback_paths:
                 print(f"Fichiers trouvés dans {fallback_dir}:")
-                for i, filename in enumerate(fallback_files, 1):
-                    filepath = os.path.join(fallback_dir, filename)
+                for i, filepath in enumerate(fallback_paths, 1):
                     size_mb = os.path.getsize(filepath) / 1024 / 1024
-                    print(f"   {i}. {filename} ({size_mb:.1f} MB)")
+                    print(f"   {i}. {os.path.basename(filepath)} ({size_mb:.1f} MB)")
                 
                 # Utiliser fallback_dir comme dossier de travail
-                export_dir = fallback_dir
-                npz_files = fallback_files
+                npz_files = fallback_paths
             else:
                 print("Aucun fichier NPZ projeté trouvé nulle part")
                 return
@@ -434,16 +443,16 @@ def smart_projected_conversion_menu():
             return
 
     print("Fichiers NPZ projetés disponibles:")
-    for i, filename in enumerate(npz_files, 1):
-        filepath = os.path.join(export_dir, filename)
+    for i, filepath in enumerate(npz_files, 1):
         size_mb = os.path.getsize(filepath) / 1024 / 1024
-        print(f"   {i}. {filename} ({size_mb:.1f} MB)")
+        rel = os.path.relpath(filepath, export_root)
+        print(f"   {i}. {rel} ({size_mb:.1f} MB)")
 
     # Sélection fichier
     try:
         choice = int(input(f"\nChoisir fichier (1-{len(npz_files)}): ")) - 1
         if 0 <= choice < len(npz_files):
-            selected_file = os.path.join(export_dir, npz_files[choice])
+            selected_file = npz_files[choice]
         else:
             print("Choix invalide")
             return
@@ -453,6 +462,10 @@ def smart_projected_conversion_menu():
 
     # Estimation taille
     estimated_gb = estimate_projected_csv_size(selected_file)
+
+    # Déterminer sous-dossier de sortie miroir
+    run_subdir = os.path.relpath(os.path.dirname(selected_file), export_root)
+    out_root = os.path.join(export_root, run_subdir) if run_subdir not in ('.', '') else export_root
 
     if estimated_gb > 2:
         print(f"\nFICHIER VOLUMINEUX DÉTECTÉ ({estimated_gb:.1f} GB)")
@@ -479,20 +492,20 @@ def smart_projected_conversion_menu():
                     print(f"   Recommandation: {recommended_frames} frames par chunk")
 
                     frames_per_chunk = int(input(f"Frames par chunk (défaut {recommended_frames}): ") or str(recommended_frames))
-                    convert_projected_npz_to_csv_chunked(selected_file, frames_per_chunk)
+                    convert_projected_npz_to_csv_chunked(selected_file, frames_per_chunk, out_root=out_root)
                 else:
                     frames_per_chunk = int(input("Frames par chunk (défaut 50): ") or "50")
-                    convert_projected_npz_to_csv_chunked(selected_file, frames_per_chunk)
+                    convert_projected_npz_to_csv_chunked(selected_file, frames_per_chunk, out_root=out_root)
                 data_temp.close()
             elif option == 2:
-                convert_projected_npz_to_csv_chunked(selected_file, float('inf'))  # Toutes les frames en un seul chunk
+                convert_projected_npz_to_csv_chunked(selected_file, float('inf'), out_root=out_root)  # Toutes les frames en un seul chunk
             else:
                 print("Annulé")
         except ValueError:
             print("Choix invalide")
     else:
         # Conversion directe pour petits fichiers
-        convert_projected_npz_to_csv_chunked(selected_file)
+        convert_projected_npz_to_csv_chunked(selected_file, out_root=out_root)
 
 if __name__ == "__main__":
     smart_projected_conversion_menu()

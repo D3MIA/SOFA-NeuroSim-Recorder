@@ -1,200 +1,420 @@
-# Brain Simulation Data Processing Pipeline
+# Brain Force Estimation Pipeline
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Installation](#installation)
 - [Architecture](#architecture)
 - [File Structure](#file-structure)
+- [Core Libraries](#core-libraries)
 - [Complete Pipeline](#complete-pipeline)
-- [Data Flow](#data-flow)
+- [Configuration](#configuration)
+- [Data Formats](#data-formats)
+- [Advanced Features](#advanced-features)
 
 ---
 
 ## Overview
 
-This pipeline processes biomechanical brain simulation data from the SOFA Framework to create datasets for advanced computational analysis.
+Complete biomechanical brain simulation pipeline with force estimation capabilities using the SOFA Framework. This system generates realistic surgical simulation data with synchronized 3D geometry, forces, and camera projections for machine learning applications.
 
 ### Key Capabilities
 
-- Surface deformation capture with displacement vectors
-- 3D→Pixel projection using SOFA camera matrices
-- CSV chunk processing for memory optimization
-- Vertex overlay visualization on original images
+- **Advanced SOFA Simulation** with realistic automatic surgical deformers
+- **Force Estimation** with noise modeling
+- **Synchronized Data Capture** (geometry, forces, images, camera parameters)
+- **3D→2D Projection** with real camera matrices
+- **Vertex Overlay on Images** to visualize the projected surfaces' vertices on original images
+
+---
+
+## Installation
+
+### Prerequisites
+
+```bash
+# SOFA Framework (tested with v25.06)
+# Available at: https://www.sofa-framework.org/
+
+# Python dependencies
+pip install numpy torch torchvision tqdm Pillow opencv-python
+```
 
 ---
 
 ## Architecture
 
 ```
-SOFA Simulation → NPZ Export → 3D Projection → CSV Export (Optional) → Overlay On images (Debugging)
-      ↓              ↓                ↓                     ↓                            ↓
-   brain.py     AnimationRecorder  npz_projection   projected_npz_to_csv.py     overlay_vertices_on_images.py
-                Surface Capture    .py                  (optional)                     (optional)
-
+SOFA Simulation → Force Recording → 3D Projection →       Training
+     ↓                   ↓                  ↓                ↓
+  brain.py         AnimationRecorder  npz_projection.py   [Documented on another github]
+     +                   +                  +
+ simlib.deformers   simlib.recorders   Camera Matrices
 ```
 
 ### Data Processing Stages
 
-1. **Simulation Stage** - SOFA biomechanical simulation
-2. **Capture Stage** - Surface deformation recording with AnimationRecorder
+1. **Simulation** - SOFA biomechanical simulation with advanced deformers
+2. **Recording** - Multi-modal capture (positions, forces, images, camera)
 3. **Export Stage** - NPZ format with displacement vectors to simulation_output/
-4. **Projection Stage** - Direct NPZ to projected NPZ with pixel coordinates
-5. **CSV Export Stage** - Optional conversion of projected NPZ to CSV format
-6. **Visualization Stage** - Vertex overlays on images
+4. **Projection** - 3D→2D conversion with real camera parameters
+5. **Visualization Stage** - Vertex overlays on images
 
 ---
 
 ## File Structure
 
 ```
-brain/               
-├──  Core Simulation Files
-│   ├── brain.py                           # Main SOFA simulation with AnimationRecorder
-│   └── data/                              # Brain mesh and texture files
-├──  Data Processing Pipeline
-│   ├── npz_projection.py           # Direct NPZ to projected NPZ conversion
-│   ├── projected_npz_to_csv.py            # Optional: Projected NPZ→CSV conversion
-│   └── overlay_vertices_on_images.py      # Vertex visualization on images
-├──  Output Directories
-    ├── simulation_output/                  # Main output directory
-    │   ├── images/                        # Original simulation frames
-    │   ├── brain_surface_*.npz            # Surface capture data
-    │   ├── brain_surface_*_summary.csv    # Summary statistics
-    │   ├── brain_surface_*_meta.json      # Metadata files
-    │   └── camera_params_*.json           # SOFA camera parameters
-    ├── projected_npz/                     # Projection results directory
-    │   ├── brain_surface_*_projected.npz  # Projected data with pixel coordinates
-    │   └── brain_surface_*_projected.csv  # Projected CSV data (optional)
-    └── overlayed_frames/                  # Visualization outputs
+ForceEstimation/
+├── Core Simulation
+│   ├── brain.py                           # Main SOFA simulation
+│   ├── simlib/                           # Custom simulation library
+│   │   ├── recorders.py                  # AnimationRecorder with force capture
+│   │   ├── deformers.py                  # Surgical tools (QuadSlide, DeepPress)
+│   │   ├── forces.py                     # Force aggregation and conversion
+│   │   ├── camera.py                     # Camera parameter extraction
+│   │   └── visual.py                     # Visual monitoring tools
+│   └── data/                             # Brain meshes and textures
+│       ├── surface_full.obj              # Full brain surface mesh
+│       ├── surface_full_decimated.obj    # Optimized surface mesh
+│       ├── surface_skull.obj             # Skull surface mesh
+│       ├── volume_simplified.obj         # Volumetric mesh for FEM
+│       ├── texture.png                   # Original brain texture
+│       ├── texture_outpaint.png          # New brain texture used for the simulation
+│       ├── texture_outpaint2.png         # Original brain texture outpainted (variant 2, used for detection)
+│       ├── craniotomy_region_texture_common.npz      # Auto-detected surgical region
+│       └── craniotomy_region_texture_common_meta.json # Detection metadata
+├── Data Processing
+│   ├── npz_projection.py                 # 3D→2D projection with camera matrices
+│   ├── projected_npz_to_csv.py           # NPZ→CSV conversion (optional)
+│   └── overlay_vertices_on_images.py     # Visualization tools
+├── Tools
+│   ├── tools/detect_craniotomy_from_textures.py  # Automatic craniotomy detection
+│   ├── tools/validate_craniotomy_mask.py         # Surgical region validation
+│   ├── tools/npz_to_force_heatmaps.py           # Force visualization
+│   └── tools/decimate_mesh.py                   # Mesh optimization from 200k vertices to 40k
+└── Output Directories
+    ├── simulation_output/                 # Simulation results
+    │   ├── run_seed_*/                   # Individual simulation runs
+    │   │   ├── brain_surface_*_auto.npz  # Surface data with forces
+    │   │   ├── brain_surface_*_meta.json # Metadata and quality metrics
+    │   │   ├── camera_params_*.json      # SOFA camera parameters
+    │   │   └── images/                   # Simulation frames (1920x1080)
+    ├── projected_npz/                    # 3D→2D projection results -> Those results are then used to train our models
+    └── overlayed_frames/                 # Visualization outputs
+```
+
+---
+
+## Core Libraries
+
+### `simlib.recorders.AnimationRecorder`
+
+Advanced recording system with force capture:
+
+```python
+recorder = AnimationRecorder(
+    surface_ogl_model=surface_model,
+    volume_mo=brain.dofs,                 # Volume mechanical object
+    force_sampling_k=8,                   # Force interpolation neighbors
+    force_noise_std=0.1,                  # Gaussian noise (N)
+    force_noise_rel=0.02,                 # Relative noise (2% of |F|)
+    force_noise_outlier_prob=0.01,        # Outlier probability per vertex
+    auto_export_frames=2000,               # Incremental export
+    capture_images=True,                   # Synchronized image capture
+    image_resolution=[1920, 1080]          # HD resolution
+)
+```
+
+**Features:**
+
+- **Absolute displacements** relative to rest state: `displacement = current_position - rest_position`
+- **Force mapping** from volume to surface mesh via interpolation
+- **Realistic noise modeling** with multiple noise sources
+- **Quality metrics** for force validation
+
+### `simlib.deformers` - Intelligent Surgical Tools
+
+**Smart Region Targeting**: All deformers operate intelligently only within the craniotomy region automatically detected by comparing `texture.png` vs `texture_outpaint2.png` using advanced computer vision techniques.
+
+#### QuadSlideDeformer
+
+```python
+deformer = QuadSlideDeformer(
+    slide_displacement=5.0,               # Tangential slide (mm)
+    slide_direction=[1, 0, 0],           # Slide vector
+    push_probability=0.3,                 # Probability of perpendicular push
+    restriction_mask_npz="data/craniotomy_region_texture_common.npz"  # Auto-detected region
+)
+```
+
+#### DeepPressPusher
+
+```python
+pusher = DeepPressPusher(
+    max_depth=8.0,                       # Maximum penetration depth
+    pressure_pattern="gaussian",          # Force distribution
+    activation_frames=range(50, 150),     # Time window
+    region_mask="data/craniotomy_region_texture_common.npz"  # Surgical boundary
+)
+```
+
+**Craniotomy Detection Process:**
+
+1. **Texture Analysis** - Compares original brain texture with surgical modification
+2. **Differential Processing** - Uses Lab color space or RGB mean differences
+3. **Region Segmentation** - Gaussian smoothing + percentile thresholding
+4. **UV Mapping** - Projects 2D mask to 3D brain surface vertices
+5. **Validation** - Distance analysis and Z-distribution validation
+
+### `simlib.forces.ExternalForceAggregator`
+
+Manages multiple force sources:
+
+```python
+aggregator = ExternalForceAggregator(
+    deformers=[slide_deformer, press_pusher],
+    mechanical_object=brain.dofs,
+    force_scale=1000.0                    # Conversion to Newtons
+)
 ```
 
 ---
 
 ## Complete Pipeline
 
-### Stage 1: Simulation & Capture
+### Stage 0: Craniotomy Detection (Pre-processing)
 
 ```bash
-# Run SOFA simulation with surface capture
-python brain.py
+# Automatic detection of surgical region from texture differences
+python tools/detect_craniotomy_from_textures.py \
+  --brain-surface data/surface_full_decimated.obj \
+  --texture-ref data/texture.png \
+  --texture-alt data/texture_outpaint2.png \
+  --outdir data \
+  --mode common \
+  --gauss-sigma 2.0
 ```
 
 **What happens:**
 
-- Loads brain mesh (241,011 vertices)
-- Applies biomechanical forces
-- Captures surface deformations with AnimationRecorder
-- Exports NPZ with 4 keys: `rest`, `frames`, `displacements`, `times`
-- Saves camera parameters in JSON format
+- **Texture Comparison** - Analyzes differences between original and modified brain textures
+- **Computer Vision Processing** - Uses Lab color space for perceptually accurate differences
+- **Gaussian Smoothing** - Reduces noise with configurable sigma
+- **Intelligent Thresholding** - Percentile-based or Otsu automatic threshold selection
+- **UV→3D Mapping** - Projects 2D surgical mask to 3D brain surface vertices
+- **Quality Validation** - Distance metrics and Z-distribution analysis
 
-**Output:** `simulation_output/brain_surface_[ID].npz`
+**Output:**
 
-### Stage 2: 3D→Pixel Projection
+```
+data/
+├── craniotomy_region_texture_common.npz    # Vertex indices in surgical region
+├── craniotomy_region_texture_common_meta.json  # Detection metadata
+└── craniotomy_validation_stats.json        # Quality metrics
+```
+
+### Stage 1: SOFA Simulation
 
 ```bash
-# Project 3D coordinates directly to NPZ with pixel data
+# Run simulation with specific seed for reproducibility
+python brain.py --seed 9999
+```
+
+**Configuration options:**
+
+- `--seed` - Random seed for reproducible results - Seed here affects the deformers position and direction for more variability through datasets
+- `--frames` - Number of simulation frames (default: 300)
+- `--output-dir` - Custom output directory
+
+**What happens:**
+
+- Loads brain mesh (40k surface vertices, volumetric FEM)
+- Applies realistic surgical deformations (slide + push)
+- Records synchronized data every frame:
+  - Surface positions and displacements (absolute vs rest)
+  - Volume and surface forces (in Newtons)
+  - Camera parameters from SOFA InteractiveCamera
+  - HD images (1920x1080) with clean rendering
+
+**Output:**
+
+```
+simulation_output/run_seed_9999/
+├── brain_surface_*_auto.npz           # Main data (7 keys)
+├── brain_surface_*_meta.json          # Quality metrics and metadata
+├── brain_surface_*_summary.csv        # Per-frame statistics
+├── camera_params_COMPLETE_*.json      # Camera matrices
+└── images/frame_*.png                 # Synchronized images
+```
+
+### Stage 2: 3D→2D Projection
+
+```bash
+# Project 3D coordinates to pixel space using real camera matrices
 python npz_projection.py
 ```
 
-**What happens:**
+**Features:**
 
-- Loads original NPZ file and camera parameters
-- Processes all frames with 3D→pixel transformation
-- Adds pixel coordinates, visibility masks, and depth values
-- Saves incrementally every 50 frames (backup protection)
-- Creates single projected NPZ file
+- **Real camera matrices** from SOFA InteractiveCamera
+- **Incremental saving** every 50 frames (resume capability)
+- **Visibility culling** and depth computation
+- **Memory efficient** processing
 
-**Output:** `projected_npz/brain_surface_[ID]_projected.npz`
+**Output:** `projected_npz/brain_surface_*_projected.npz`
 
-### Stage 3: CSV Export (Optional)
-
-```bash
-# Convert projected NPZ to CSV format for analysis
-python projected_npz_to_csv.py
-```
-
-**What happens:**
-
-- Loads projected NPZ file
-- Processes data in memory-efficient chunks
-- Exports CSV with all projection data
-- Includes pixel coordinates, visibility, and depth
-
-**Output:** `projected_npz/brain_surface_[ID]_projected.csv`
-
-### Stage 4: Visualization & Validation
+### Stage 3: Visualization & Validation
 
 ```bash
-# Create vertex overlays on original images
+# Create vertex overlays for visual validation
 python overlay_vertices_on_images.py
 ```
 
-**What happens:**
-
-- Loads original simulation images
-- Loads projected NPZ data directly
-- Overlays vertices on images (colored by depth)
-- Creates comparison grids and statistics
-- Validates projection accuracy
-
-**Output:** `overlayed_frames/overlay_frame_*.png` files
+**Output:** `overlayed_frames/overlay_frame_*.png`
 
 ---
 
-## Data Flow
+## Configuration
 
-### Data Formats Throughout Pipeline
-
-#### 1. **NPZ Format** (simulation_output/)
+### Simulation Parameters
 
 ```python
-# Structure: 4 keys
-{
-    'rest': (241011, 3),        # Rest positions XYZ
-    'frames': (300, 241011, 3), # Deformed positions per frame
-    'displacements': (300, 241011, 3), # Displacement vectors
-    'times': (300,)             # Time stamps
+# brain.py configuration
+SIMULATION_CONFIG = {
+    'duration': 15.0,                     # Simulation time (seconds)
+    'dt': 0.05,                          # Time step
+    'frames': 300,                       # Total frames to capture
+    'seed': 9999,                        # Reproducibility seed
+}
+
+DEFORMATION_CONFIG = {
+    'slide_displacement': 5.0,            # Tangential slide (mm)
+    'push_probability': 0.3,              # Push activation probability
+    'max_depth': 8.0,                    # Maximum penetration
+    'force_scale': 1000.0,               # N to simulation units
+}
+
+NOISE_CONFIG = {
+    'force_noise_std': 0.1,              # Absolute noise (N)
+    'force_noise_rel': 0.02,             # Relative noise (2% of |F|)
+    'force_noise_bias': None,            # Optional constant bias
+    'force_noise_outlier_prob': 0.01,    # Outlier probability
+    'force_noise_outlier_scale': 10.0,   # Outlier magnitude multiplier
 }
 ```
 
-#### 2. **Projected NPZ Format** (projected_npz/)
-
-```python
-# Structure: 7 keys (original + projected data)
-{
-    'rest': (241011, 3),           # Rest positions XYZ
-    'frames': (300, 241011, 3),    # Deformed positions per frame
-    'displacements': (300, 241011, 3), # Displacement vectors
-    'times': (300,),               # Time stamps
-    'projected_pixels': (300, 241011, 2), # Pixel coordinates XY
-    'visibility_masks': (300, 241011),    # Visibility boolean
-    'depth_values': (300, 241011)         # Depth in NDC
-}
-```
-
-#### 3. **CSV Format** (projected_npz/ - Optional)
-
-```csv
-# Columns: 17 total (all projection data included)
-frame,vertex_id,time,x,y,z,pixel_x,pixel_y,depth_ndc,is_visible,disp_x,disp_y,disp_z,displacement_magnitude,rest_x,rest_y,rest_z
-
-0,0,0.0,-45.1,12.3,5.9,856.2,423.7,0.654,1,0.1,0.2,0.1,0.245,-45.2,12.1,5.8
-```
-
-#### 4. **Camera Parameters JSON**
+### Camera Parameters
 
 ```json
 {
-  "essential_params": {
-    "position": [-86.338, -17.669, 126.0],
-    "orientation": [0.049, -0.297, 0.051, 0.952],
-    "viewport_width": 1920,
-    "viewport_height": 1080,
-    "projectionMatrix": [...],
-    "modelViewMatrix": [...]
+  "position": [-86.338, -17.669, 126.0],
+  "orientation": [0.049, -0.297, 0.051, 0.952],
+  "field_of_view": 45.0,
+  "viewport_width": 1920,
+  "viewport_height": 1080,
+  "znear": 0.1,
+  "zfar": 1000.0
+}
+```
+
+---
+
+## Data Formats
+
+### NPZ Structure (simulation_output/)
+
+```python
+{
+    'rest': (40652, 3),                 # Rest state positions [mm]
+    'frames': (300, 40652, 3),          # Deformed positions per frame [mm]
+    'displacements': (300, 40652, 3),   # Absolute displacements [mm]
+    'times': (300,),                     # Timestamps [s]
+    'surface_forces': (300, 40652, 3),  # Surface forces [N]
+    'surface_external_forces': (300, 40652, 3), # External forces [N] -- optional also for other purpose uses
+}
+```
+
+### Projected NPZ Structure
+
+```python
+{
+    # Original data
+    'rest': (40652, 3),
+    'frames': (300, 40652, 3),
+    'displacements': (300, 40652, 3),
+    'times': (300,),
+    'surface_forces': (300, 40652, 3),
+
+    # Projection data
+    'projected_pixels': (300, 40652, 2),  # Pixel coordinates [px,py]
+    'visibility_masks': (300, 40652),     # Boolean visibility
+    'depth_values': (300, 40652)          # Normalized depth [0,1]
+}
+```
+
+### Metadata JSON
+
+```json
+{
+  "session_id": "a1b2c3d4",
+  "frame_count": 300,
+  "duration": 15.0,
+  "surface_vertex_count": 40652,
+  "force_quality": {
+    "overall_max": 2.45,                 # Maximum force magnitude [N]
+    "overall_mean_of_means": 0.15,       # Average force per frame [N]
+    "zero_frames": 0,                    # Frames with no forces
+    "mapping_ok": true,                  # Force interpolation quality
+    "numeric_ok": true                   # No NaN/Inf values
+  },
+  "force_noise": {
+    "std_abs_N": 0.1,                   # Noise configuration
+    "std_rel": 0.02,
+    "outlier_prob": 0.01
+  },
+  "units": {
+    "length": "mm",
+    "time": "s",
+    "force": "N"
   }
 }
 ```
+
+---
+
+## Advanced Features
+
+### Force Noise Modeling
+
+Realistic force noise with multiple components:
+
+```python
+# Combined noise model
+noise = gaussian_noise + relative_noise + outliers + bias
+where:
+  gaussian_noise ~ N(0, force_noise_std²)
+  relative_noise ~ N(0, (force_noise_rel × |F|)²)
+  outliers: random vertices with 10× noise magnitude
+  bias: optional constant offset
+```
+
+### Resume Capabilities
+
+All processing stages support resuming:
+
+- **Incremental NPZ saving** every N frames
+- **Checkpoint detection** for interrupted runs
+- **Partial result validation** before resume
+
+### Quality Validation
+
+Automated quality checks:
+
+- **Force magnitude ranges** (realistic vs. outliers)
+- **Temporal consistency** (no sudden spikes)
+- **Numerical stability** (no NaN/Inf values)
+- **Projection accuracy** (vertex-image alignment)
 
 ---
 
@@ -210,4 +430,6 @@ Below are examples of vertex projections onto images:
 
 ![Frame 050](overlayed_frames/overlay_frame_0050.png)
 
-_Created: August 2025 | Version: 1.0 | Brain Simulation Data Processing Pipeline_
+---
+
+**Created:** October 2025 | **Version:** 2.0 | **Brain Force Estimation Pipeline**
