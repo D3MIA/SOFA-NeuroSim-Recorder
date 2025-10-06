@@ -168,7 +168,7 @@ def createScene(root):
         pass
 
     # Use a single seed value for both the tool and recorder run naming
-    tool_seed = 9999
+    tool_seed = 1111
     run_subdir = f"run_seed_{tool_seed}"
     run_dir = os.path.join("simulation_output", run_subdir)
 

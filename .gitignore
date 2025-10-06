@@ -3,3 +3,5 @@ projection_chunks.py
 /projected_npz
 /simulation_output
 /tools/detect_craniotomy.py
+/run*
+/datasets*

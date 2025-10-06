@@ -86,7 +86,9 @@ ForceEstimation/
 │       └── craniotomy_region_texture_common_meta.json # Detection metadata
 ├── Data Processing
 │   ├── npz_projection.py                 # 3D→2D projection with camera matrices
+│   ├── build_2d_datasets.py              # Convert projected NPZ to 2D displacement datasets
 │   ├── projected_npz_to_csv.py           # NPZ→CSV conversion (optional)
+│   ├── modify_frames_with_noise.py       # Geometric noise augmentation for data enhancement
 │   └── overlay_vertices_on_images.py     # Visualization tools
 ├── Tools
 │   ├── tools/detect_craniotomy_from_textures.py  # Automatic craniotomy detection
@@ -100,7 +102,11 @@ ForceEstimation/
     │   │   ├── brain_surface_*_meta.json # Metadata and quality metrics
     │   │   ├── camera_params_*.json      # SOFA camera parameters
     │   │   └── images/                   # Simulation frames (1920x1080)
-    ├── projected_npz/                    # 3D→2D projection results -> Those results are then used to train our models
+    ├── projected_npz/                    # 3D→2D projection results
+    ├── datasets_2d/                      # 2D displacement datasets for ML training
+    │   └── run_seed_*/                   # Per-run 2D datasets
+    ├── datasets_2d_modified/             # Noise-augmented datasets
+    │   └── run_seed_*/                   # Augmented versions with geometric noise
     └── overlayed_frames/                 # Visualization outputs
 ```
 
@@ -264,7 +270,44 @@ python npz_projection.py
 
 **Output:** `projected_npz/brain_surface_*_projected.npz`
 
-### Stage 3: Visualization & Validation
+### Stage 3: 2D Dataset Creation
+
+```bash
+# Convert projected NPZ files to 2D displacement datasets
+python build_2d_datasets.py --root . --out datasets_2d --verbose
+```
+
+**Features:**
+
+- **Batch processing** of multiple simulation runs (run*seed*\*)
+- **2D displacement extraction** from projected 3D coordinates
+- **Force magnitude computation** from 3D force vectors
+- **Cross-platform compatibility** with progress tracking
+
+**Output:** `datasets_2d/run_seed_*/brain_surface_*_2d.npz`
+
+### Stage 4: Noise Augmentation
+
+```bash
+# Apply geometric noise to existing frames for data augmentation
+python modify_frames_with_noise.py \
+  --input_dir datasets_2d \
+  --output_dir datasets_2d_modified \
+  --noise_percentage 0.05 \
+  --displacement_noise 0.10 \
+  --modify_ratio 0.3
+```
+
+**Features:**
+
+- **Geometric noise augmentation** proportional to displacement range
+- **Impact region exclusion** to preserve surgical tool contact areas
+- **Selective frame modification** (configurable percentage)
+- **Displacement-aware scaling** (±10% of local displacement range)
+
+**Output:** `datasets_2d_modified/run_seed_*/brain_surface_*_2d.npz`
+
+### Stage 5: Visualization & Validation
 
 ```bash
 # Create vertex overlays for visual validation
@@ -301,6 +344,14 @@ NOISE_CONFIG = {
     'force_noise_bias': None,            # Optional constant bias
     'force_noise_outlier_prob': 0.01,    # Outlier probability
     'force_noise_outlier_scale': 10.0,   # Outlier magnitude multiplier
+}
+
+# Data augmentation configuration
+AUGMENTATION_CONFIG = {
+    'noise_percentage': 0.05,            # 5% of points receive noise per frame
+    'displacement_noise': 0.10,          # ±10% of displacement range
+    'modify_ratio': 0.3,                 # 30% of frames modified
+    'exclude_impact_regions': True,      # Exclude high-force areas
 }
 ```
 
@@ -353,6 +404,28 @@ NOISE_CONFIG = {
 }
 ```
 
+### 2D Dataset NPZ Structure
+
+```python
+{
+    'disp2d': (2000, 40652, 2),          # 2D displacement vectors [dx,dy]
+    'force_mag': (2000, 40652),          # Force magnitude [N]
+    'projected_pixels': (2000, 40652, 2), # Pixel coordinates [px,py]
+    'visibility': (2000, 40652)          # Boolean visibility mask
+}
+```
+
+### Noise-Augmented Dataset Structure
+
+Same as 2D Dataset but with:
+
+- **30% of frames modified** with geometric noise
+- **5% of visible points** receive noise per modified frame
+- **±10% displacement range** noise scaling
+- **Impact region exclusion** (high force magnitude areas)
+
+````
+
 ### Metadata JSON
 
 ```json
@@ -379,7 +452,7 @@ NOISE_CONFIG = {
     "force": "N"
   }
 }
-```
+````
 
 ---
 
@@ -399,6 +472,20 @@ where:
   bias: optional constant offset
 ```
 
+### Geometric Noise Augmentation
+
+Data augmentation with displacement-aware noise:
+
+```python
+# Geometric noise model for 2D displacements
+noise_scale = displacement_noise * displacement_range_per_point
+noise_x ~ N(0, noise_scale_x²)
+noise_y ~ N(0, noise_scale_y²)
+
+# Impact region exclusion
+exclude_if: force_magnitude > percentile(forces, 90)
+```
+
 ### Resume Capabilities
 
 All processing stages support resuming:
@@ -415,6 +502,7 @@ Automated quality checks:
 - **Temporal consistency** (no sudden spikes)
 - **Numerical stability** (no NaN/Inf values)
 - **Projection accuracy** (vertex-image alignment)
+- **Noise validation** (displacement comparison with thresholding)
 
 ---
 
@@ -432,4 +520,4 @@ Below are examples of vertex projections onto images:
 
 ---
 
-**Created:** October 2025 | **Version:** 2.0 | **Brain Force Estimation Pipeline**
+**Created:** October 2025 | **Version:** 3.0 | **Brain Force Estimation Pipeline with Noise Augmentation**
