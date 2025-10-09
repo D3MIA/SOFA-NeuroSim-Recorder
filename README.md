@@ -47,7 +47,7 @@ pip install numpy torch torchvision tqdm Pillow opencv-python
 ```
 SOFA Simulation → Force Recording → 3D Projection →       Training
      ↓                   ↓                  ↓                ↓
-  brain.py         AnimationRecorder  npz_projection.py   [Documented on another github]
+  brain.py         AnimationRecorder  npz_projection.py   [documented in this github repository [Force-Estimation-Models](https://github.com/D3MIA/Force-Estimation-Models) repository.]
      +                   +                  +
  simlib.deformers   simlib.recorders   Camera Matrices
 ```
