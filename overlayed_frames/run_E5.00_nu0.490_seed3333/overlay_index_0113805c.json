@@ -1,0 +1,114 @@
+{
+  "session_id": "0113805c",
+  "creation_date": "2026-02-24T13:04:02.546340",
+  "camera_params": {
+    "position": [
+      -86.337846,
+      -17.669077,
+      126.000266
+    ],
+    "orientation": [
+      0.04916680896372585,
+      -0.2965581106825318,
+      0.0513037021194534,
+      0.9523674931629964
+    ],
+    "lookat": [
+      -80.7396477882632,
+      -16.428288807060003,
+      117.8075464317248
+    ],
+    "fov": 45.0,
+    "viewport": [
+      1920,
+      1080
+    ]
+  },
+  "processing_summary": {
+    "total_frames": 10,
+    "successful_overlays": 10,
+    "total_vertices_processed": 203260
+  },
+  "frame_details": [
+    {
+      "frame_index": 0,
+      "image_file": "frame_0000.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0000.png"
+    },
+    {
+      "frame_index": 3,
+      "image_file": "frame_0003.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0003.png"
+    },
+    {
+      "frame_index": 6,
+      "image_file": "frame_0006.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0006.png"
+    },
+    {
+      "frame_index": 9,
+      "image_file": "frame_0009.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0009.png"
+    },
+    {
+      "frame_index": 12,
+      "image_file": "frame_0012.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0012.png"
+    },
+    {
+      "frame_index": 15,
+      "image_file": "frame_0015.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0015.png"
+    },
+    {
+      "frame_index": 18,
+      "image_file": "frame_0018.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0018.png"
+    },
+    {
+      "frame_index": 21,
+      "image_file": "frame_0021.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0021.png"
+    },
+    {
+      "frame_index": 24,
+      "image_file": "frame_0024.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0024.png"
+    },
+    {
+      "frame_index": 27,
+      "image_file": "frame_0027.jpg",
+      "total_vertices": 20326,
+      "visible_vertices": 20326,
+      "visibility_rate": 100.0,
+      "output_file": "overlay_frame_0027.png"
+    }
+  ]
+}

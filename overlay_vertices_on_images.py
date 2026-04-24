@@ -5,7 +5,6 @@ import os
 import json
 import uuid
 import numpy as np
-import pandas as pd
 from datetime import datetime
 import glob
 from PIL import Image, ImageDraw, ImageFont
@@ -16,29 +15,49 @@ import cv2
 class VertexImageOverlay:
     """Superposition des sommets sur les images originales"""
     
-    def __init__(self, camera_params_file=None):
+    def __init__(self, run_dir=None, camera_params_file=None):
         self.session_id = str(uuid.uuid4())[:8]
+        
+        # Auto-detect run_dir if not provided
+        if run_dir is None:
+            run_dir = self._find_latest_run_dir()
+        if run_dir is None:
+            raise FileNotFoundError("Aucun run_dir trouvé dans simulation_output/. "
+                                    "Passez run_dir='simulation_output/run_E...' en argument.")
+        self.run_dir = os.path.normpath(run_dir)
+        run_subdir = os.path.basename(self.run_dir)  # e.g. run_E2.50_nu0.450_seed1111
+        
+        # Dossiers
+        self.images_dir   = os.path.join(self.run_dir, "images")
+        self.projected_dir = os.path.join("projected_npz", run_subdir)
+        self.output_dir   = os.path.join("overlayed_frames", run_subdir)
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Cache NPZ
+        self._npz_data = None
+        self._npz_path = None
         
         # Chargement paramètres caméra SOFA réels
         self.camera_params = self._load_real_camera_params(camera_params_file)
-        
-        # Dimensions viewport
-        self.screen_width = self.camera_params['viewport_width']
-        self.screen_height = self.camera_params['viewport_height']
+
+        # Dimensions: use actual image resolution from disk (projection was computed in that space)
+        # Camera viewport may differ (e.g. 2560×1600) from saved images (e.g. 1920×1080)
+        img_res = self._detect_image_resolution()
+        if img_res is not None:
+            self.screen_width, self.screen_height = img_res
+            print(f"   Résolution détectée depuis images: {self.screen_width}x{self.screen_height}")
+        else:
+            self.screen_width  = self.camera_params['viewport_width']
+            self.screen_height = self.camera_params['viewport_height']
+            print(f"   Résolution fallback (camera params): {self.screen_width}x{self.screen_height}")
         
         print(f"VertexImageOverlay {self.session_id} - SUPERPOSITION VERTICES SUR IMAGES")
+        print(f"   Run dir        : {self.run_dir}")
         print(f"   Position caméra: [{self.camera_params['position'][0]:.1f}, {self.camera_params['position'][1]:.1f}, {self.camera_params['position'][2]:.1f}]")
         print(f"   Viewport: {self.screen_width}x{self.screen_height}")
-        
-        # Dossiers
-        self.images_dir = "simulation_output/images"
-        self.projected_dir = "projected_chunks"
-        self.output_dir = "overlayed_frames"
-        os.makedirs(self.output_dir, exist_ok=True)
-        
         print(f"   Images originales: {self.images_dir}/")
         print(f"   Données projetées: {self.projected_dir}/")
-        print(f"   Sortie overlays: {self.output_dir}/")
+        print(f"   Sortie overlays  : {self.output_dir}/")
     
     def _load_real_camera_params(self, camera_params_file):
         """Charge les paramètres caméra (version simplifiée)"""
@@ -98,289 +117,366 @@ class VertexImageOverlay:
             'modelview_matrix': None
         }
     
-    def _find_latest_camera_params(self):
-        """Trouve le fichier de paramètres caméra le plus récent"""
-        export_dir = "simulation_output"
-        if not os.path.exists(export_dir):
+    def _detect_image_resolution(self):
+        """Détecte la résolution réelle des images sauvegardées (source de vérité pour pixel coords)."""
+        if not os.path.exists(self.images_dir):
             return None
-        
+        for fname in sorted(os.listdir(self.images_dir)):
+            if fname.lower().endswith(('.jpg', '.jpeg', '.png')):
+                try:
+                    img = Image.open(os.path.join(self.images_dir, fname))
+                    w, h = img.size
+                    img.close()
+                    return (w, h)
+                except Exception:
+                    continue
+        return None
+
+    def _find_latest_camera_params(self):
+        """Trouve le fichier de paramètres caméra le plus récent dans run_dir ou simulation_output/"""
+        # Search in run_dir first, then parent simulation_output/
+        search_dirs = []
+        if hasattr(self, 'run_dir') and self.run_dir:
+            search_dirs.append(self.run_dir)
+        search_dirs.append("simulation_output")
+
         camera_files = []
-        for filename in os.listdir(export_dir):
-            if filename.startswith('camera_params_') and filename.endswith('.json'):
-                camera_files.append(os.path.join(export_dir, filename))
-        
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
+            for filename in os.listdir(search_dir):
+                if filename.startswith('camera_params_') and filename.endswith('.json'):
+                    camera_files.append(os.path.join(search_dir, filename))
+
         if camera_files:
             return max(camera_files, key=lambda f: os.path.getmtime(f))
         return None
-    
-    def find_single_frame_data(self, frame_idx):
-        """Trouve les données pour une seule frame spécifique"""
-        
-        print(f"\nRECHERCHE DONNÉES FRAME {frame_idx}:")
-        
-        # 1. Vérification image correspondante
-        if not os.path.exists(self.images_dir):
-            print(f"❌ Dossier images introuvable: {self.images_dir}")
+
+    def _find_latest_run_dir(self):
+        """Trouve le run_dir le plus récent dans simulation_output/"""
+        sim_dir = "simulation_output"
+        if not os.path.exists(sim_dir):
             return None
-        
-        # Recherche image pour cette frame
-        expected_image = os.path.join(self.images_dir, f"frame_{frame_idx:04d}.png")
-        if not os.path.exists(expected_image):
-            # Essai avec d'autres formats
-            for ext in ['.jpg', '.jpeg']:
-                alt_image = os.path.join(self.images_dir, f"frame_{frame_idx:04d}{ext}")
-                if os.path.exists(alt_image):
-                    expected_image = alt_image
-                    break
-            else:
-                print(f"❌ Image frame {frame_idx} introuvable")
-                return None
-        
-        print(f"   Image trouvée: {os.path.basename(expected_image)}")
-        
-        # 2. Recherche données projetées pour cette frame
+        run_dirs = [
+            os.path.join(sim_dir, d)
+            for d in os.listdir(sim_dir)
+            if os.path.isdir(os.path.join(sim_dir, d)) and d.startswith("run_")
+        ]
+        if not run_dirs:
+            return None
+        return max(run_dirs, key=lambda d: os.path.getmtime(d))
+
+    def _load_projected_npz(self):
+        """Charge (et met en cache) le fichier NPZ projeté pour ce run"""
+        if self._npz_data is not None:
+            return self._npz_data
         if not os.path.exists(self.projected_dir):
-            print(f"❌ Dossier données projetées introuvable: {self.projected_dir}")
+            print(f"❌ Dossier projeté introuvable: {self.projected_dir}")
             return None
-        
-        projected_files = glob.glob(os.path.join(self.projected_dir, "*_projected.csv"))
-        if not projected_files:
-            print(f"❌ Aucune donnée projetée trouvée")
+        npz_files = sorted(glob.glob(os.path.join(self.projected_dir, "*_projected*.npz")))
+        if not npz_files:
+            print(f"❌ Aucun fichier *_projected*.npz dans {self.projected_dir}")
             return None
-        
-        # Trouve les vertices pour cette frame spécifique
-        projected_data = self._find_projected_data_for_frame(frame_idx, projected_files)
-        
-        if projected_data is None:
-            print(f"❌ Aucune donnée trouvée pour frame {frame_idx}")
+        self._npz_path = npz_files[0]
+        print(f"   Chargement NPZ: {os.path.basename(self._npz_path)} ...")
+        self._npz_data = np.load(self._npz_path, allow_pickle=False)
+        n_frames, n_verts, _ = self._npz_data['frames'].shape
+        print(f"   NPZ chargé: {n_frames} frames × {n_verts} vertices")
+        return self._npz_data
+    
+    def _make_frame_image_path(self, sim_frame_idx):
+        """Retourne le chemin de l'image correspondant au frame de simulation donné."""
+        for ext in ['.jpg', '.jpeg', '.png']:
+            p = os.path.join(self.images_dir, f"frame_{sim_frame_idx:04d}{ext}")
+            if os.path.exists(p):
+                return p
+        return None
+
+    def _compute_global_force_vmax(self):
+        """Scans all frames in the NPZ and returns the global max force magnitude.
+        Cached in self._global_force_vmax so it is only computed once."""
+        if hasattr(self, '_global_force_vmax') and self._global_force_vmax is not None:
+            return self._global_force_vmax
+        npz = self._load_projected_npz()
+        if npz is None or 'surface_external_forces' not in npz:
+            self._global_force_vmax = None
             return None
-        
-        print(f"   Vertices trouvés: {len(projected_data)}")
-        
+        print("   Calcul vmax force global sur toutes les frames...")
+        forces = npz['surface_external_forces']          # (N_frames, N_verts, 3)
+        mags   = np.linalg.norm(forces, axis=2)          # (N_frames, N_verts)
+        self._global_force_vmax = float(mags.max())
+        print(f"   vmax force global: {self._global_force_vmax*1e3:.3f} mN")
+        return self._global_force_vmax
+
+    def _build_frame_data_entry(self, npz, sim_frame_idx):
+        """
+        Construit l'entrée frame_data pour un index de frame simulation.
+        projected_data shape: (N, 4) → [pixel_x, pixel_y, is_visible, depth]
+        force_magnitudes shape: (N,)
+        """
+        pixels  = npz['projected_pixels'][sim_frame_idx]          # (N, 2)
+        visible = npz['visibility_masks'][sim_frame_idx].astype(np.float32)  # (N,)
+        depths  = npz['depth_values'][sim_frame_idx]               # (N,)
+        forces  = npz['surface_external_forces'][sim_frame_idx]    # (N, 3)
+        force_mag = np.linalg.norm(forces, axis=1)                 # (N,)
+        # Peak applied force = max per-vertex magnitude
+        peak_force_N = float(force_mag.max())
+
+        projected_data = np.column_stack([
+            pixels[:, 0],   # pixel_x
+            pixels[:, 1],   # pixel_y
+            visible,        # is_visible
+            depths          # depth
+        ])
+
+        image_file = self._make_frame_image_path(sim_frame_idx)
+
         return {
-            'frame_index': frame_idx,
-            'image_file': expected_image,
-            'projected_data': projected_data
+            'frame_index'     : sim_frame_idx,
+            'image_file'      : image_file,
+            'projected_data'  : projected_data,   # (N, 4)
+            'force_magnitudes': force_mag,         # (N,)
+            'peak_force_N'    : peak_force_N,      # max vertex force this frame (N)
         }
 
+    def find_single_frame_data(self, frame_idx):
+        """Trouve les données pour une seule frame spécifique (index simulation)."""
+
+        print(f"\nRECHERCHE DONNÉES FRAME {frame_idx}:")
+
+        npz = self._load_projected_npz()
+        if npz is None:
+            return None
+
+        n_frames = npz['frames'].shape[0]
+        if not (0 <= frame_idx < n_frames):
+            print(f"❌ frame_idx {frame_idx} hors bornes (0–{n_frames-1})")
+            return None
+
+        entry = self._build_frame_data_entry(npz, frame_idx)
+
+        if entry['image_file'] is None:
+            print(f"⚠️  Image frame {frame_idx} introuvable (données projetées disponibles)")
+        else:
+            print(f"   Image trouvée: {os.path.basename(entry['image_file'])}")
+
+        visible_count = int(np.sum(entry['projected_data'][:, 2] == 1))
+        print(f"   Vertices: {len(entry['projected_data']):,} (visibles: {visible_count:,})")
+
+        return entry
+
     def find_images_and_data(self, max_frames=200):
-        """Trouve les images et données projetées correspondantes"""
-        
+        """Trouve les images sur disque et leurs données projetées depuis le NPZ."""
+
         print(f"\nRECHERCHE IMAGES ET DONNÉES:")
-        
-        # 1. Recherche images originales
+
+        npz = self._load_projected_npz()
+        if npz is None:
+            return []
+
+        n_frames = npz['frames'].shape[0]
+
+        # --- Scan actual images on disk (ground truth) ---
         if not os.path.exists(self.images_dir):
             print(f"❌ Dossier images introuvable: {self.images_dir}")
             return []
-        
-        image_files = []
-        for ext in ['*.png', '*.jpg', '*.jpeg']:
-            image_files.extend(glob.glob(os.path.join(self.images_dir, ext)))
-        
-        # Tri par nom pour ordre cohérent
-        image_files.sort()
-        
-        if not image_files:
-            print(f"❌ Aucune image trouvée dans {self.images_dir}")
-            return []
-        
-        print(f"   Images trouvées: {len(image_files)}")
-        
-        # 2. Recherche données projetées
-        if not os.path.exists(self.projected_dir):
-            print(f"❌ Dossier données projetées introuvable: {self.projected_dir}")
-            return []
-        
-        projected_files = glob.glob(os.path.join(self.projected_dir, "*_projected.csv"))
-        projected_files.sort()
-        
-        if not projected_files:
-            print(f"❌ Aucune donnée projetée trouvée dans {self.projected_dir}")
-            return []
-        
-        print(f"   Fichiers projetés trouvées: {len(projected_files)}")
-        
-        # 3. Correspondance frame par frame
+
+        image_map = {}   # sim_frame_idx → image_path
+        for fname in os.listdir(self.images_dir):
+            root, ext = os.path.splitext(fname)
+            if ext.lower() not in ('.jpg', '.jpeg', '.png'):
+                continue
+            # expect: frame_NNNN.ext
+            parts = root.split('_')
+            if len(parts) >= 2 and parts[0] == 'frame':
+                try:
+                    sim_idx = int(parts[1])
+                    if 0 <= sim_idx < n_frames:
+                        image_map[sim_idx] = os.path.join(self.images_dir, fname)
+                except ValueError:
+                    pass
+
+        sorted_indices = sorted(image_map.keys())
+        print(f"   Images sur disque (≤ n_frames): {len(sorted_indices)}")
+
+        limit = min(max_frames, len(sorted_indices))
         frame_data = []
-        
-        for frame_idx in range(min(max_frames, len(image_files))):
-            if frame_idx >= len(image_files):
-                break
-                
-            image_file = image_files[frame_idx]
-            
-            # Trouve les données projetées pour cette frame
-            projected_data = self._find_projected_data_for_frame(frame_idx, projected_files)
-            
-            if projected_data is not None:
-                frame_data.append({
-                    'frame_index': frame_idx,
-                    'image_file': image_file,
-                    'projected_data': projected_data
-                })
-                
-                if frame_idx < 10:  # Log des premières frames
-                    print(f"   Frame {frame_idx:03d}: {os.path.basename(image_file)} + {len(projected_data)} vertices")
-        
+
+        for i, sim_idx in enumerate(sorted_indices[:limit]):
+            entry = self._build_frame_data_entry(npz, sim_idx)
+            entry['image_file'] = image_map[sim_idx]   # use confirmed on-disk path
+            frame_data.append(entry)
+
+            if i < 5:
+                visible_count = int(np.sum(entry['projected_data'][:, 2] == 1))
+                print(f"   Frame sim {sim_idx:04d}: {os.path.basename(image_map[sim_idx])}"
+                      f" + {visible_count:,} vertices visibles")
+
         print(f"   Correspondances trouvées: {len(frame_data)} frames")
-        
         return frame_data
+
     
-    def _find_projected_data_for_frame(self, frame_idx, projected_files):
-        """Trouve les données projetées pour une frame spécifique"""
-        
-        all_vertices = []
-        
-        # Parcourt tous les fichiers chunks projetés
-        for projected_file in projected_files:
-            try:
-                df = pd.read_csv(projected_file)
-                
-                # Filtre pour la frame spécifique
-                frame_data = df[df['frame'] == frame_idx]
-                
-                if len(frame_data) > 0:
-                    # Extrait les données nécessaires
-                    vertices_data = frame_data[['pixel_x', 'pixel_y', 'is_visible', 'depth_ndc']].values
-                    all_vertices.extend(vertices_data)
-                    
-            except Exception as e:
-                continue  # Ignore les erreurs de lecture
-        
-        if len(all_vertices) > 0:
-            return np.array(all_vertices)
-        
-        return None
-    
-    def create_single_overlay(self, frame_data, vertex_size=2, show_invisible=False):
-        """Crée un overlay pour une seule frame"""
-        
-        frame_idx = frame_data['frame_index']
-        image_file = frame_data['image_file']
+    def create_single_overlay(self, frame_data, vertex_size=2, show_invisible=False,
+                              color_by='force', force_vmax=None):
+        """Crée un overlay pour une seule frame.
+
+        color_by  : 'force' (défaut) → magnitude force en N
+                    'depth'          → profondeur NDC
+        force_vmax: échelle fixe pour le colormap force (en N).
+                    Si None, utilise le max de la frame courante.
+        """
+        frame_idx     = frame_data['frame_index']
+        image_file    = frame_data['image_file']
         projected_data = frame_data['projected_data']
-        
+        force_magnitudes = frame_data.get('force_magnitudes', None)
+
+        if color_by == 'force' and force_magnitudes is None:
+            color_by = 'depth'  # fallback
+
         print(f"DÉBUT création overlay frame {frame_idx:03d}: {len(projected_data)} vertices")
-        
-        # Chargement image originale
-        try:
-            print(f"   Chargement image: {os.path.basename(image_file)}")
-            original_image = Image.open(image_file)
-            img_width, img_height = original_image.size
-            
-            # Redimensionnement si nécessaire
-            if img_width != self.screen_width or img_height != self.screen_height:
-                original_image = original_image.resize((self.screen_width, self.screen_height), Image.LANCZOS)
-                print(f"   Image redimensionnée: {img_width}x{img_height} → {self.screen_width}x{self.screen_height}")
-            
-        except Exception as e:
-            print(f"   Erreur chargement image: {e}")
-            return None
-        
+
+        # Chargement image originale (ou fond noir si image manquante)
+        if image_file and os.path.exists(image_file):
+            try:
+                print(f"   Chargement image: {os.path.basename(image_file)}")
+                original_image = Image.open(image_file)
+                img_width, img_height = original_image.size
+                # Always use actual image dimensions as the coordinate space
+                # (projected_pixels were computed at this resolution)
+                self.screen_width  = img_width
+                self.screen_height = img_height
+                print(f"   Dimensions image: {img_width}x{img_height}")
+            except Exception as e:
+                print(f"   Erreur chargement image: {e}")
+                original_image = Image.new('RGB', (self.screen_width, self.screen_height), 'black')
+        else:
+            print(f"   ⚠️  Image introuvable — fond noir utilisé")
+            original_image = Image.new('RGB', (self.screen_width, self.screen_height), 'black')
+
         print(f"   Création figure matplotlib...")
-        # Création overlay avec matplotlib pour meilleur contrôle
         fig, ax = plt.subplots(1, 1, figsize=(16, 9))
-        
-        # Affichage image de fond
         ax.imshow(original_image, extent=[0, self.screen_width, self.screen_height, 0])
-        
+
         # Séparation vertices visibles/invisibles
-        visible_mask = projected_data[:, 2] == 1  # is_visible
-        
+        visible_mask     = projected_data[:, 2] == 1
         visible_vertices = projected_data[visible_mask]
         invisible_vertices = projected_data[~visible_mask]
-        
-        visible_count = len(visible_vertices)
+
+        visible_count   = len(visible_vertices)
         invisible_count = len(invisible_vertices)
-        
         print(f"   Vertices: {visible_count:,} visibles, {invisible_count:,} invisibles")
-        
-        # Overlay vertices visibles (points colorés par profondeur)
+
+        # Overlay vertices visibles
         if len(visible_vertices) > 0:
             pixel_x = visible_vertices[:, 0]
             pixel_y = visible_vertices[:, 1]
-            depths = visible_vertices[:, 3]
-            
-            # Points colorés par profondeur
-            # Colormaps disponibles:
-            # 'plasma' - Violet(proche) → Rouge(loin) [DÉFAUT]
-            # 'viridis' - Violet(proche) → Jaune(loin) 
-            # 'coolwarm' - Bleu(proche) → Rouge(loin)
-            # 'jet' - Bleu(proche) → Rouge(loin) [classique]
-            # 'hot' - Noir(proche) → Blanc(loin)
-            scatter = ax.scatter(pixel_x, pixel_y, c=depths, cmap='plasma', 
-                               s=vertex_size**2, alpha=0.8, edgecolors='white', linewidth=0.3)
-            
-            # Colorbar pour profondeur
+
+            if color_by == 'force' and force_magnitudes is not None:
+                color_values   = force_magnitudes[visible_mask]
+                cmap_name      = 'hot'
+                colorbar_label = 'Force magnitude (N)'
+                vmin_val = 0.0
+                vmax_val = force_vmax if force_vmax is not None else float(color_values.max()) if len(color_values) else 1.0
+            else:
+                color_values   = visible_vertices[:, 3]   # depth_ndc
+                cmap_name      = 'plasma'
+                colorbar_label = 'Profondeur NDC'
+                vmin_val, vmax_val = None, None
+
+            scatter = ax.scatter(pixel_x, pixel_y, c=color_values, cmap=cmap_name,
+                                 vmin=vmin_val, vmax=vmax_val,
+                                 s=vertex_size**2, alpha=0.8, edgecolors='none')
             cbar = plt.colorbar(scatter, ax=ax, shrink=0.8)
-            cbar.set_label('Profondeur NDC', rotation=270, labelpad=15)
-        
+            cbar.set_label(colorbar_label, rotation=270, labelpad=15)
+            if vmax_val is not None:
+                cbar.ax.axhline(y=vmax_val, color='cyan', linewidth=1, alpha=0.6)
+
         # Overlay vertices invisibles (optionnel)
         if show_invisible and len(invisible_vertices) > 0:
-            pixel_x_inv = invisible_vertices[:, 0]
-            pixel_y_inv = invisible_vertices[:, 1]
-            
-            ax.scatter(pixel_x_inv, pixel_y_inv, c='red', s=vertex_size**2/4, 
-                      alpha=0.3, marker='x', label='Hors écran')
-        
+            ax.scatter(invisible_vertices[:, 0], invisible_vertices[:, 1],
+                       c='red', s=vertex_size**2/4, alpha=0.3, marker='x',
+                       label='Hors écran')
+
         # Configuration axes
         ax.set_xlim(0, self.screen_width)
-        ax.set_ylim(self.screen_height, 0)  # Inversion Y pour image
+        ax.set_ylim(self.screen_height, 0)
         ax.set_xlabel('Pixel X')
         ax.set_ylabel('Pixel Y')
-        ax.set_title(f'Brain Vertices Overlay - Frame {frame_idx:03d}\n'
-                    f'Visibles: {visible_count:,} | Invisibles: {invisible_count:,}', 
-                    fontsize=14, fontweight='bold')
-        
-        # Ajout statistiques
-        stats_text = f'Frame: {frame_idx:03d}\nVisibles: {visible_count:,}\nInvisibles: {invisible_count:,}\nTotal: {len(projected_data):,}'
-        ax.text(10, 40, stats_text, 
-               bbox=dict(boxstyle="round,pad=0.5", facecolor="black", alpha=0.7),
-               fontsize=10, color='white', fontweight='bold')
-        
-        # Marqueur centre écran
+
+        color_label = 'force' if color_by == 'force' else 'profondeur'
+        ax.set_title(f'Brain Vertices Overlay - Frame {frame_idx:04d}  '
+                     f'(couleur={color_label})\n'
+                     f'Visibles: {visible_count:,} | Invisibles: {invisible_count:,}',
+                     fontsize=14, fontweight='bold')
+
+        # --- Statistiques textuelles ---
+        npz_times = self._npz_data['times'] if self._npz_data is not None and 'times' in self._npz_data else None
+        time_s = float(npz_times[frame_idx]) if npz_times is not None else frame_idx * 0.03
+        peak_force_N = frame_data.get('peak_force_N', None)
+
+        info_lines = [
+            f"Frame: {frame_idx:04d}",
+            f"Time : {time_s:.2f} s",
+            f"Visibles  : {visible_count:,}",
+            f"Invisibles: {invisible_count:,}",
+        ]
+
+        if color_by == 'force' and force_magnitudes is not None:
+            fv = force_magnitudes[visible_mask]
+            if len(fv):
+                f_peak_mN  = (peak_force_N or fv.max()) * 1e3
+                f_mean_mN  = float(fv.mean()) * 1e3
+                f_scale_mN = (force_vmax or fv.max()) * 1e3
+                info_lines += [
+                    "",
+                    f"Force pic   : {f_peak_mN:.2f} mN",
+                    f"Force moy   : {f_mean_mN:.2f} mN",
+                    f"Scale (vmax): {f_scale_mN:.2f} mN",
+                ]
+
+        stats_text = "\n".join(info_lines)
+        ax.text(10, 15, stats_text,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="black", alpha=0.75),
+                fontsize=11, color='white', fontweight='bold',
+                verticalalignment='top', transform=ax.transData)
+
         center_x, center_y = self.screen_width // 2, self.screen_height // 2
         ax.plot(center_x, center_y, 'w+', markersize=15, markeredgewidth=2, alpha=0.8)
-        
-        # Légende
+
         if show_invisible and invisible_count > 0:
             ax.legend(loc='upper right')
-        
+
         plt.tight_layout()
-        
-        # Sauvegarde avec feedback détaillé
+
         output_filename = f"overlay_frame_{frame_idx:04d}.png"
         output_path = os.path.join(self.output_dir, output_filename)
-        
+
         print(f"   SAUVEGARDE en cours: {output_filename}")
-        print(f"   Chemin: {output_path}")
-        
         try:
             plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='black')
             plt.close()
-            
-            # Force flush to ensure immediate save
-            import gc
-            gc.collect()  # Force garbage collection to free memory immediately
-            
-            # Vérification que le fichier a bien été créé
+            import gc; gc.collect()
             if os.path.exists(output_path):
-                file_size = os.path.getsize(output_path) / 1024  # KB
+                file_size = os.path.getsize(output_path) / 1024
                 print(f"   FICHIER SAUVÉ! {output_filename} ({file_size:.1f} KB)")
                 return output_path
             else:
                 print(f"   ERREUR: Fichier non créé après plt.savefig!")
                 return None
-                
         except Exception as e:
             print(f"   ERREUR sauvegarde: {e}")
-            plt.close()  # Ferme quand même la figure
+            plt.close()
             return None
+
     
     def create_all_overlays(self, max_frames=200, vertex_size=2, show_invisible=False):
         """Crée tous les overlays"""
         
         print(f"CRÉATION OVERLAYS COMPLETS")
         print("=" * 60)
+
+        # Compute global force scale FIRST so n_loaded uses the correct threshold
+        global_vmax = self._compute_global_force_vmax()
         
         # Recherche données
         frame_data_list = self.find_images_and_data(max_frames)
@@ -407,6 +503,10 @@ class VertexImageOverlay:
             print(f"   ERREUR accès dossier: {e}")
             return []
         
+        # global_vmax already computed above; log it here
+        if global_vmax is not None:
+            print(f"   Colormap fixe: 0 – {global_vmax*1e3:.2f} mN (identique pour toutes les frames)")
+
         # Traitement de tous les overlays
         output_files = []
         
@@ -415,11 +515,13 @@ class VertexImageOverlay:
         
         for i, frame_data in enumerate(frame_data_list):
             frame_idx = frame_data['frame_index']
-            print(f"\n{'='*15} FRAME {i+1}/{len(frame_data_list)} (Frame #{frame_idx:03d}) {'='*15}")
-            print(f"🎯 DÉBUT traitement frame {frame_idx:03d}...")
-            
+            print(f"\n{'='*15} FRAME {i+1}/{len(frame_data_list)} (Frame #{frame_idx:04d}) {'='*15}")
+
             # Traitement et sauvegarde immédiate
-            output_file = self.create_single_overlay(frame_data, vertex_size, show_invisible)
+            output_file = self.create_single_overlay(
+                frame_data, vertex_size, show_invisible,
+                color_by='force', force_vmax=global_vmax
+            )
             
             if output_file:
                 output_files.append(output_file)
@@ -680,51 +782,56 @@ def process_images(image_dir, vertices_json, output_dir):
 
 def main():
     """Menu principal pour création overlays"""
-    
+    import sys
+
     print("VERTEX IMAGE OVERLAY")
     print("=" * 60)
     print("Superposition des vertices projetés sur les images originales")
     print()
+
+    # Optional: run_dir as first CLI argument
+    # e.g.:  python overlay_vertices_on_images.py simulation_output/run_E2.50_nu0.450_seed1111
+    run_dir = sys.argv[1] if len(sys.argv) > 1 else None
     
     # Initialisation
-    overlay_creator = VertexImageOverlay()
+    try:
+        overlay_creator = VertexImageOverlay(run_dir=run_dir)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        print("Usage: python overlay_vertices_on_images.py [run_dir]")
+        return
     
     # Menu options
-    print("Options disponibles:")
+    print("\nOptions disponibles:")
     print("  1. Créer tous les overlays (200 frames max)")
     print("  2. Créer overlays personnalisés")
-    print("  3. Test sur quelques frames")
-    print("  4. Test sur une frame spécifique")
+    print("  3. Test sur 10 premières frames avec image")
+    print("  4. Test sur une frame de simulation spécifique")
     print("  5. Quitter")
     
     try:
         choice = int(input("\nVotre choix (1-5): "))
         
         if choice == 1:
-            # Traitement complet
             print("\nCréation overlays complets...")
             output_files = overlay_creator.create_all_overlays(max_frames=200, vertex_size=2)
             
             if output_files:
-                # Grille de comparaison
                 overlay_creator.create_comparison_grid(output_files, grid_size=(4, 4))
-                
-                # Statistiques
                 frame_data_list = overlay_creator.find_images_and_data(200)
                 overlay_creator.create_statistics_summary(frame_data_list)
-                
                 print(f"\nTraitement terminé! {len(output_files)} overlays créés")
                 print(f"Résultats dans: {overlay_creator.output_dir}/")
             
         elif choice == 2:
-            # Paramètres personnalisés
-            max_frames = int(input("Nombre max de frames (défaut 200): ") or "200")
+            max_frames  = int(input("Nombre max de frames (défaut 200): ") or "200")
             vertex_size = int(input("Taille vertices en pixels (défaut 2): ") or "2")
             show_invisible = input("Afficher vertices invisibles? (y/N): ").lower() == 'y'
+            color_by    = input("Colorier par force ou profondeur? (force/depth) [force]: ").strip() or "force"
             
             output_files = overlay_creator.create_all_overlays(
-                max_frames=max_frames, 
-                vertex_size=vertex_size, 
+                max_frames=max_frames,
+                vertex_size=vertex_size,
                 show_invisible=show_invisible
             )
             
@@ -732,12 +839,10 @@ def main():
                 overlay_creator.create_comparison_grid(output_files)
                 frame_data_list = overlay_creator.find_images_and_data(max_frames)
                 overlay_creator.create_statistics_summary(frame_data_list)
-                
                 print(f"\nTraitement terminé! {len(output_files)} overlays créés")
             
         elif choice == 3:
-            # Test sur quelques frames
-            print("\nTest sur 10 premières frames...")
+            print("\nTest sur 10 premières frames avec image...")
             output_files = overlay_creator.create_all_overlays(max_frames=10, vertex_size=3)
             
             if output_files:
@@ -745,54 +850,54 @@ def main():
                 print(f"\nTest terminé! {len(output_files)} overlays créés")
             
         elif choice == 4:
-            # Test frame spécifique
-            frame_number = int(input("Numéro de frame à tester (0-199): "))
-            if 0 <= frame_number <= 199:
+            frame_number = int(input("Numéro de frame simulation (0-1999): "))
+            if 0 <= frame_number <= 1999:
                 print(f"\nTest frame spécifique: {frame_number}")
                 
-                # Trouve les données pour cette frame uniquement
                 target_frame = overlay_creator.find_single_frame_data(frame_number)
                 
                 if target_frame:
-                    # Paramètres pour frame spécifique
-                    vertex_size = int(input("Taille vertices en pixels (défaut 3): ") or "3")
+                    vertex_size    = int(input("Taille vertices en pixels (défaut 3): ") or "3")
                     show_invisible = input("Afficher vertices invisibles? (y/N): ").lower() == 'y'
+                    color_by       = input("Colorier par force ou profondeur? (force/depth) [force]: ").strip() or "force"
                     
                     print(f"\nCréation overlay frame {frame_number}...")
+                    global_vmax = overlay_creator._compute_global_force_vmax()
                     output_file = overlay_creator.create_single_overlay(
-                        target_frame, 
-                        vertex_size=vertex_size, 
-                        show_invisible=show_invisible
+                        target_frame,
+                        vertex_size=vertex_size,
+                        show_invisible=show_invisible,
+                        color_by=color_by,
+                        force_vmax=global_vmax
                     )
                     
                     if output_file:
-                        print(f"Overlay frame {frame_number} créé!")
-                        print(f"Fichier: {output_file}")
-                        
-                        # Statistiques détaillées pour cette frame
-                        projected_data = target_frame['projected_data']
-                        visible_count = np.sum(projected_data[:, 2] == 1)
-                        total_vertices = len(projected_data)
-                        visibility_rate = visible_count / total_vertices * 100
-                        
+                        projected_data   = target_frame['projected_data']
+                        force_magnitudes = target_frame.get('force_magnitudes')
+                        visible_mask     = projected_data[:, 2] == 1
+                        visible_count    = int(visible_mask.sum())
+                        total_vertices   = len(projected_data)
+                        visibility_rate  = visible_count / total_vertices * 100
+
                         print(f"\nStatistiques frame {frame_number}:")
-                        print(f"   Total vertices: {total_vertices:,}")
-                        print(f"   Vertices visibles: {visible_count:,}")
-                        print(f"   Taux visibilité: {visibility_rate:.1f}%")
-                        
-                        # Analyse profondeur
-                        depths = projected_data[:, 3]  # depth_ndc
-                        visible_depths = depths[projected_data[:, 2] == 1]
-                        if len(visible_depths) > 0:
-                            print(f"   Profondeur min: {visible_depths.min():.3f}")
-                            print(f"   Profondeur max: {visible_depths.max():.3f}")
-                            print(f"   Profondeur moyenne: {visible_depths.mean():.3f}")
+                        print(f"   Total vertices     : {total_vertices:,}")
+                        print(f"   Vertices visibles  : {visible_count:,}")
+                        print(f"   Taux visibilité    : {visibility_rate:.1f}%")
+                        if force_magnitudes is not None:
+                            fv = force_magnitudes[visible_mask]
+                            if len(fv):
+                                print(f"   Force max visible  : {fv.max()*1e3:.3f} mN")
+                                print(f"   Force moy visible  : {fv.mean()*1e3:.3f} mN")
+                        depths = projected_data[visible_mask, 3]
+                        if len(depths):
+                            print(f"   Profondeur min/max : {depths.min():.3f} / {depths.max():.3f}")
+                        print(f"   Fichier sauvé      : {output_file}")
                     else:
                         print(f"Erreur création overlay frame {frame_number}")
                 else:
                     print(f"Frame {frame_number} introuvable dans les données")
             else:
-                print("Numéro de frame invalide (doit être entre 0 et 199)")
+                print("Numéro de frame invalide (doit être entre 0 et 1999)")
             
         elif choice == 5:
             print("Au revoir!")

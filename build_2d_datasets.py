@@ -44,7 +44,7 @@ def process_file(path, out_root, root, overwrite=False, verbose=True):
     data = np.load(path, mmap_mode='r')
     
     # Check required keys for projected data
-    required_keys = ['surface_forces']
+    required_keys = ['surface_external_forces']
     missing = [k for k in required_keys if k not in data.files]
     if missing:
         raise ValueError(f"{path} missing required keys: {missing}")
@@ -53,14 +53,14 @@ def process_file(path, out_root, root, overwrite=False, verbose=True):
     disp2d = derive_disp2d(data)
     
     # Extract force magnitudes
-    force_mag = np.linalg.norm(data['surface_forces'], axis=2).astype(np.float32)
+    force_mag = np.linalg.norm(data['surface_external_forces'], axis=2).astype(np.float32)
     
     # Determine output path structure: run_seed_*/filename_2d.npz
     rel = safe_relpath(path, root)
     parts = rel.split(os.sep)  # Use os.sep for cross-platform compatibility
     
-    if len(parts) >= 2 and parts[0].startswith('run_seed_'):
-        # Structure: run_seed_XXXX/filename.npz -> datasets_2d/run_seed_XXXX/filename_2d.npz
+    if len(parts) >= 2 and parts[0].startswith('run_'):
+        # Structure: run_E*_nu*_seed*/filename.npz -> datasets_2d/run_E*_nu*_seed*/filename_2d.npz
         subdir = os.path.join(out_root, parts[0])
     else:
         # Fallback: put in root output directory
@@ -104,6 +104,8 @@ def process_file(path, out_root, root, overwrite=False, verbose=True):
         save_data['visibility_masks'] = data['visibility_masks'].astype(np.bool_)
     if 'depth_values' in data.files:
         save_data['depth_values'] = data['depth_values'].astype(np.float32)
+    if 'image_frame_indices' in data.files:
+        save_data['image_frame_indices'] = data['image_frame_indices'].astype(np.int32)
     
     # Save compressed NPZ
     np.savez_compressed(out_path, **save_data)
@@ -119,10 +121,10 @@ def process_file(path, out_root, root, overwrite=False, verbose=True):
     return out_path
 
 def discover(root):
-    """Find all projected NPZ files in run_seed_* directories"""
-    # Pattern for projected NPZ files: run_seed_*/brain_surface_*_projected_*.npz
-    pattern1 = os.path.join(root, 'run_seed_*', '*projected*.npz')
-    pattern2 = os.path.join(root, 'run_seed_*', 'brain_surface_*.npz')
+    """Find all projected NPZ files in run_* directories"""
+    # Pattern for projected NPZ files: run_*/brain_surface_*_projected_*.npz
+    pattern1 = os.path.join(root, 'run_*', '*projected*.npz')
+    pattern2 = os.path.join(root, 'run_*', 'brain_surface_*.npz')
     
     files = []
     files.extend(glob.glob(pattern1))
@@ -136,7 +138,7 @@ def discover(root):
 def main():
     """Build 2D datasets from projected NPZ files in run_seed_* directories"""
     parser = argparse.ArgumentParser(description='Convert projected 3D simulation data to 2D displacement datasets')
-    parser.add_argument('--root', '-r', default='.', help='Root directory containing run_seed_* folders')
+    parser.add_argument('--root', '-r', default='projected_npz', help='Root directory containing run_* folders (default: projected_npz)')
     parser.add_argument('--out', '-o', default='datasets_2d', help='Output directory for 2D datasets')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing files')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')

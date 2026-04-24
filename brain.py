@@ -9,6 +9,13 @@ from simlib import (
 
 
 def createScene(root):
+   
+    # ── Simulation parameters (overridable via environment variables) ──────────
+    YOUNG   = float(os.environ.get("BRAIN_YOUNG",   "3.0"))   # kPa  (internal unit = kPa in mm/kg/s)
+    POISSON = float(os.environ.get("BRAIN_POISSON", "0.45"))  # dimensionless
+    SEED    = int(os.environ.get("BRAIN_SEED",     "1111"))   # RNG seed
+    print(f"[brain.py] E={YOUNG} kPa  nu={POISSON}  seed={SEED}")
+    # ────────────────────────────────────────────────────────────────────────────
     plugins = [
         "MultiThreading",
         "Sofa.Component.SolidMechanics.Spring",
@@ -52,7 +59,7 @@ def createScene(root):
     except Exception:
         pass
 
-    root.gravity = [0, -9.81, 0]
+    root.gravity = [0, 0, 0]   # Brain in CSF → near-neutral buoyancy → net gravity ≈ 0 (physically correct)
     root.dt = 0.03
     root.addObject("DefaultAnimationLoop")
 
@@ -79,12 +86,13 @@ def createScene(root):
         n=[16, 16, 16],
     )
     br.addObject("MechanicalObject", name="dofs")
-    br.addObject("UniformMass", totalMass=1.00)
-    br.addObject("ParallelTetrahedronFEMForceField", youngModulus=500, poissonRatio=0.4)
-    br.addObject("DiagonalVelocityDampingForceField", dampingCoefficient=2.0)
+    br.addObject("UniformMass", totalMass=1.25)  # ~1.04 g/cm³ × 1200 cm³ ≈ 1.25 kg
+    br.addObject("ParallelTetrahedronFEMForceField", youngModulus=YOUNG, poissonRatio=POISSON)
+    br.addObject("DiagonalVelocityDampingForceField", dampingCoefficient=1.5)  # scaled with stiffness: ~1.5 N·s/m equivalent
 
     vis = br.addChild("Visual")
     # Prefer decimated mesh if available; fallback to full-resolution mesh
+    # ~30k faces / ~15k vertices: good balance of speed and surface detail
     decimated_path = os.path.join("data", "surface_full_decimated.obj")
     full_path = os.path.join("data", "surface_full.obj")
     mesh_file = decimated_path if os.path.exists(decimated_path) else full_path
@@ -125,7 +133,7 @@ def createScene(root):
         "RestShapeSpringsForceField",
         name="holeSprings",
         points="@ring.indices",
-        stiffness=8e4,
+        stiffness=500,  # 500 mN/mm = 0.5 N/mm – soft craniotomy boundary
         angularStiffness=0,
     )
 
@@ -168,8 +176,9 @@ def createScene(root):
         pass
 
     # Use a single seed value for both the tool and recorder run naming
-    tool_seed = 1111
-    run_subdir = f"run_seed_{tool_seed}"
+    tool_seed = SEED
+    # Run folder encodes all parameters for easy identification
+    run_subdir = f"run_E{YOUNG:.2f}_nu{POISSON:.3f}_seed{tool_seed}"
     run_dir = os.path.join("simulation_output", run_subdir)
 
     # Save camera params and an initial screenshot into the same run directory
@@ -181,7 +190,7 @@ def createScene(root):
     force_noise_rel = 0.0         # relative std (fraction of |F|). e.g., 0.02 for 2%
     # Optional extras
     # Set a small constant bias so the epsilon is not zero-mean; use scalar or a vector [bx,by,bz]
-    force_noise_bias = 0.02       # e.g., 0.02 N or [0.0, 0.0, -0.02]
+    force_noise_bias = 0.0            # 0.0 = no bias; any nonzero adds a uniform floor to ALL vertices (destroys spatial localization)
     force_noise_outlier_prob = 0.0    # probability of outlier per vertex
     force_noise_outlier_scale = 10.0  # outlier std multiplier
 
@@ -191,11 +200,15 @@ def createScene(root):
         force_every_frame=True,
         auto_export_frames=2000,
         capture_images=True,
+        image_every=3,              # capture image every 3 frames → 3× less GPU stall
+        image_format='jpg',         # JPEG: ~5× faster to write than PNG
+        image_quality=92,           # 92% quality, visually lossless
         force_debug_images=False,
         image_resolution=[1920, 1080],
         outDir="simulation_output",
         volume_mo=br.dofs,
         force_sampling_k=8,
+        record_stride=2,            # save every 2nd vertex: 40k → 20k (2× less data, same quality)
         run_name=run_subdir,
         # Noise knobs
         force_noise_std=force_noise_std_N,
@@ -204,6 +217,9 @@ def createScene(root):
         force_noise_outlier_prob=force_noise_outlier_prob,
         force_noise_outlier_scale=force_noise_outlier_scale,
         force_noise_seed=tool_seed,
+        # Force label representation for ML training
+        force_label_mode='intensity',   # 'intensity': peak vertex = true applied force (best for direct displacement→force mapping)
+        deformers=[],                   # will be set after tool is created below
     )
 
     region_npz = (
@@ -222,26 +238,35 @@ def createScene(root):
         region_surface_npz=region_npz,
         restrict_to_region=True,
 
-        # SLIDE plus nerveux (relâche + rapide)
+        # Sliding gesture timing  (dt=0.03s → 1 frame = 30 ms)
         slide_displacement=10.0,
-        slide_force=3.6e4,          # un peu plus fort
-        ramp_in=8, hold_frames=12, ramp_out=1,   # quasi continu: relâche minimale
-        release_frames=0,                         # pas de pause entre directions
-        cooldown_between_points=0, 
+        slide_force_range=(200, 1000),  # 0.20–1.00 N, drawn fresh each direction
+        ramp_in=8,                  # 0.24 s smooth ramp up
+        hold_frames=15,             # nominal hold (overridden by hold_min/max)
+        hold_min=10, hold_max=20,   # 0.30–0.60 s varied sustained contact
+        ramp_out=8,                 # 0.24 s smooth release (was 1 → shock)
+        release_frames=5,           # 0.15 s rest between directions (was 0 → jerky)
+        cooldown_between_points=10, # 0.30 s rest between tool positions
 
         inward_dir=(0.0, 0.0, -1.0),
-        inward_bias=0.18,
+        inward_bias=0.25,           # 25% inward component → realistic indentation
 
-        # PUSH plus présent et plus ferme
-        push_probability=0.0,       # pas de push aléatoire pour continuité
-        push_force=4.2e4,           # un cran au-dessus
-        push_radius=8.0,
-        push_frames=12,             # un peu plus long
+        # Occasional push for gesture variety
+        push_probability=0.2,       # 20% chance of a push after each full sequence
+        push_force_range=(150, 800),  # 0.15–0.80 N total, normalized across nodes
+        push_radius=20.0,           # mm – matches slide radius for consistent tool size
+        push_frames=15,             # 0.45 s sustained push
 
         apply_to_mo=True,
         name="quadSlide",
     )
     br.addObject(tool)
+
+    # Aggregate all deformer forces and re-assert externalForce at onAnimateEndEvent
+    # so the recorder can read the correct value (SOFA resets externalForce during solve)
+    aggregator = ExternalForceAggregator(mo=br.dofs, deformers=[tool], name="forceAggregator")
+    br.addObject(aggregator)
+    recorder._deformers = [tool]   # wire deformer into recorder after tool is instantiated
 
     # Pour tester un appui profond, décommentez ce bloc:
     # press = DeepPressPusher(
@@ -251,7 +276,7 @@ def createScene(root):
     #     region_surface_npz=region_npz,
     #     restrict_to_region=True,
     #
-    #     force_value=5.0e4,
+    #     force_value=400,          # 400 mN = 0.4 N (firm but safe probe press)
     #     radius=9.0,
     #     ramp_in=10, hold_frames=20, ramp_out=10,
     #     cooldown_frames=8,
@@ -264,10 +289,6 @@ def createScene(root):
     #     name="deepPress",
     # )
     # br.addObject(press)
-
-
-
-
 
     # Add the recorder after aggregator to ensure end-of-frame re-assert is visible to it
     br.addObject(recorder)

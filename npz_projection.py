@@ -54,13 +54,16 @@ class NPZDirectProjector:
             if img_dir is None:
                 img_dir = os.path.join('simulation_output', 'images')
             candidates = []
-            f0 = os.path.join(img_dir, 'frame_0000.png')
-            if os.path.exists(f0):
-                candidates.append(f0)
+            f0_png = os.path.join(img_dir, 'frame_0000.png')
+            f0_jpg = os.path.join(img_dir, 'frame_0000.jpg')
+            if os.path.exists(f0_png):
+                candidates.append(f0_png)
+            elif os.path.exists(f0_jpg):
+                candidates.append(f0_jpg)
             else:
                 if os.path.isdir(img_dir):
                     for fn in os.listdir(img_dir):
-                        if fn.lower().endswith('.png'):
+                        if fn.lower().endswith(('.png', '.jpg', '.jpeg')):
                             candidates.append(os.path.join(img_dir, fn))
                             break
             if not candidates:
@@ -416,18 +419,52 @@ class NPZDirectProjector:
             rest_positions = data.get('rest', None)
             displacements = data.get('displacements', None)
             times = data.get('times', None)
-            surface_forces = data.get('surface_forces', None)
             surface_external_forces = data.get('surface_external_forces', None)
 
             n_frames, n_vertices, _ = frames.shape
+
+            # Detect image_every from meta.json in the same folder
+            image_every = 1
+            meta_candidates = [
+                f.replace('.npz', '_meta.json') for f in [npz_file]
+            ] + glob.glob(os.path.join(run_dir, '*_meta.json'))
+            for mc in meta_candidates:
+                if os.path.exists(mc):
+                    try:
+                        with open(mc) as mf:
+                            meta_data = json.load(mf)
+                        image_every = int(meta_data.get('image_every', 1))
+                        if image_every > 1:
+                            print(f"   image_every={image_every} lu depuis {os.path.basename(mc)}")
+                        break
+                    except Exception:
+                        pass
+            # Fallback: infer image_every from actual filename gaps
+            if image_every == 1:
+                img_dir = os.path.join(run_dir, 'images')
+                if os.path.isdir(img_dir):
+                    import re
+                    nums = sorted([
+                        int(m.group(1))
+                        for fn in os.listdir(img_dir)
+                        if (m := re.match(r'frame_(\d+)\.(jpg|jpeg|png)$', fn, re.IGNORECASE))
+                        and int(m.group(1)) < n_frames   # only frames within this NPZ's range
+                    ])
+                    if len(nums) >= 2:
+                        gaps = [nums[i+1] - nums[i] for i in range(min(10, len(nums)-1))]
+                        image_every = int(round(sum(gaps) / len(gaps)))
+                        print(f"   image_every={image_every} déduit depuis noms de fichiers ({len(nums)} images dans plage NPZ)")
+
+            image_frame_indices = np.arange(0, n_frames, image_every, dtype=np.int32)
+
             print("   Données extraites:")
             print(f"     Frames: {n_frames}")
             print(f"     Vertices par frame: {n_vertices}")
             print(f"     Rest positions: {'Disponible' if rest_positions is not None else 'Non disponible'}")
             print(f"     Displacements: {'Disponible' if displacements is not None else 'Non disponible'}")
             print(f"     Times: {'Disponible' if times is not None else 'Non disponible'}")
-            print(f"     Surface forces: {'Disponible' if surface_forces is not None else 'Non disponible'}")
             print(f"     Surface external forces: {'Disponible' if surface_external_forces is not None else 'Non disponible'}")
+            print(f"     Images attendues: {len(image_frame_indices)} (every {image_every} frames)")
 
             # Buffers de sortie
             projected_pixels = np.zeros((n_frames, n_vertices, 2), dtype=np.float32)
@@ -481,10 +518,9 @@ class NPZDirectProjector:
                         current_data['displacements'] = displacements[:frame_idx+1]
                     if times is not None:
                         current_data['times'] = times[:frame_idx+1]
-                    if surface_forces is not None:
-                        current_data['surface_forces'] = surface_forces[:frame_idx+1]
                     if surface_external_forces is not None:
                         current_data['surface_external_forces'] = surface_external_forces[:frame_idx+1]
+                    current_data['image_frame_indices'] = image_frame_indices[image_frame_indices <= frame_idx]
                     self._save_incremental_backup(output_file, current_data, frame_idx+1)
 
             print("   Sauvegarde finale...")
@@ -500,10 +536,9 @@ class NPZDirectProjector:
                 final_data['displacements'] = displacements
             if times is not None:
                 final_data['times'] = times
-            if surface_forces is not None:
-                final_data['surface_forces'] = surface_forces
             if surface_external_forces is not None:
                 final_data['surface_external_forces'] = surface_external_forces
+            final_data['image_frame_indices'] = image_frame_indices  # frames that have a matching image file
 
             np.savez_compressed(output_file, **final_data)
 
@@ -542,15 +577,15 @@ class NPZDirectProjector:
                 },
                 'npz_keys': {
                     'original': list(data.files),
-                    'added': ['projected_pixels', 'visibility_masks', 'depth_values'],
-                    'carried_over': [k for k in ['rest', 'displacements', 'times', 'surface_forces', 'surface_external_forces'] if k in data.files]
+                    'added': ['projected_pixels', 'visibility_masks', 'depth_values', 'image_frame_indices'],
+                    'carried_over': [k for k in ['rest', 'displacements', 'times', 'surface_external_forces'] if k in data.files]
                 },
                 'data_units': {
                     'length': 'mm',
                     'time': 's',
                     'mass': 'kg',
                     'forces': 'N',
-                    'note': 'surface_forces and surface_external_forces are stored in Newtons',
+                    'note': 'surface_external_forces are stored in Newtons',
                     'force_to_newton': 1e-3
                 }
             }

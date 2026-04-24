@@ -180,12 +180,12 @@ class DatasetFrameModifier:
         }
         
         # Copy other fields if they exist
-        for key in ['times', 'visibility_masks', 'depth_values', 'meta']:
-            if key in data.keys():
+        for key in ['times', 'visibility_masks', 'depth_values', 'meta', 'image_frame_indices']:
+            if key in data.files:
                 save_data[key] = data[key]
         
         # Add modification metadata
-        if 'meta' in data.keys():
+        if 'meta' in data.files:
             try:
                 existing_meta = json.loads(str(data['meta']))
             except:
@@ -227,7 +227,7 @@ class DatasetFrameModifier:
         
         output_path.mkdir(parents=True, exist_ok=True)
         
-        npz_files = list(input_path.glob('run_seed_*/*_2d.npz'))
+        npz_files = list(input_path.glob('run_*/*_2d.npz'))
         
         if exclude_patterns:
             for pattern in exclude_patterns:
@@ -269,9 +269,9 @@ def main():
     parser = argparse.ArgumentParser(description='Modify existing frames with geometric noise')
     parser.add_argument('--input_dir', default='datasets_2d', help='Input datasets directory')
     parser.add_argument('--output_dir', default='datasets_2d_modified', help='Output datasets directory')
-    parser.add_argument('--noise_percentage', type=float, default=0.05, help='% of points to noise')
-    parser.add_argument('--displacement_noise', type=float, default=0.05, help='% of displacement range')
-    parser.add_argument('--modify_ratio', type=float, default=0.3, help='Ratio of frames to modify')
+    parser.add_argument('--noise_percentage', type=float, default=0.05, help='%% of points to noise')
+    parser.add_argument('--displacement_noise', type=float, default=0.05, help='%% of displacement range')
+    parser.add_argument('--modify_ratio', type=float, default=0.3, help='Ratio of frames to modify (0-1)')
     parser.add_argument('--exclude_patterns', nargs='*', help='Patterns to exclude from modification')
     
     args = parser.parse_args()

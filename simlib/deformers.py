@@ -588,9 +588,10 @@ class QuadSlideDeformer(Sofa.Core.Controller):
                  region_surface_npz=None,
                  restrict_to_region=True,
                  # sliding
-                 radius=7.0,
+                 radius=20.0,        # mm – must cover ≥2 FEM nodes (grid ~9mm → radius≥20mm)
                  slide_displacement=10.0,
                  slide_force=3.2e4,
+                 slide_force_range=None,   # (min, max) mN – overrides slide_force if set
                  ramp_in=8, hold_frames=12, hold_min=5, hold_max=10, ramp_out=8,
                  release_frames=5,
                  cooldown_between_points=10,
@@ -600,6 +601,7 @@ class QuadSlideDeformer(Sofa.Core.Controller):
                  # occasional pushes
                  push_probability=0.35,
                  push_force=3.6e4,
+                 push_force_range=None,    # (min, max) mN – overrides push_force if set
                  push_radius=8.0,
                  push_frames=10,
                  # direct write to externalForce
@@ -637,6 +639,12 @@ class QuadSlideDeformer(Sofa.Core.Controller):
         self.push_radius = float(push_radius)
         self.push_frames = int(max(1, push_frames))
 
+        # Force ranges for per-direction randomization
+        self.slide_force_range = (float(slide_force_range[0]), float(slide_force_range[1])) \
+            if slide_force_range is not None else None
+        self.push_force_range = (float(push_force_range[0]), float(push_force_range[1])) \
+            if push_force_range is not None else None
+
         self.apply_to_mo = bool(apply_to_mo)
 
         # Region state
@@ -671,6 +679,8 @@ class QuadSlideDeformer(Sofa.Core.Controller):
         self._release_left = self.release_frames
         self._phase_frame = 0
         self._hold_frames_cur = self.hold_frames  # will be drawn for each phase
+        self._cur_slide_force = float(slide_force)  # drawn fresh each direction
+        self._cur_push_force = float(push_force)     # drawn fresh each push
         self._dir_seq = None  # random order per point
         self._frame_force = None
         self._phase_weights = None
@@ -789,6 +799,10 @@ class QuadSlideDeformer(Sofa.Core.Controller):
             w = np.exp(-0.5 * (d / sigma) ** 2).astype(np.float32)
             if self.restrict and self._volume_region_mask is not None:
                 w *= self._volume_region_mask.astype(np.float32)
+            # Normalize so that slide_force is truly the total applied force
+            w_sum = w.sum()
+            if w_sum > 1e-9:
+                w = w / w_sum
             self._phase_weights = w
         
         w = self._phase_weights
@@ -808,12 +822,10 @@ class QuadSlideDeformer(Sofa.Core.Controller):
         if nrm > 1e-9:
             dir_vec = dir_vec / nrm
 
-        F = (w[:, None] * (self.slide_force * scale) * dir_vec[None, :]).astype(np.float32)
+        F = (w[:, None] * (self._cur_slide_force * scale) * dir_vec[None, :]).astype(np.float32)
         self._frame_force = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
 
-        print(f"[DEBUG] Deformer {self.name}: Phase={self._phase}, "
-              f"PhaseFrame={self._phase_frame}, Scale={scale:.4f}, "
-              f"Direction={np.round(dir_vec, 2)}, ForceNorm={np.linalg.norm(self._frame_force):.4f}")
+        # (debug removed – was printing every frame)
 
     # ---------------- Force generation (push) ------------------
     def _apply_push(self):
@@ -834,8 +846,12 @@ class QuadSlideDeformer(Sofa.Core.Controller):
         w = np.exp(-0.5 * (d / sigma) ** 2).astype(np.float32)
         if self.restrict and self._volume_region_mask is not None:
             w *= self._volume_region_mask.astype(np.float32)
+        # Normalize so push_force is truly the total applied force
+        w_sum = w.sum()
+        if w_sum > 1e-9:
+            w = w / w_sum
 
-        F = (w[:, None] * (self.push_force * self.inward_dir[None, :])).astype(np.float32)
+        F = (w[:, None] * (self._cur_push_force * self.inward_dir[None, :])).astype(np.float32)
         self._frame_force = np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
 
     # ---------------- Utilities ------------------
@@ -888,8 +904,10 @@ class QuadSlideDeformer(Sofa.Core.Controller):
                 self._in_release = False
                 self._phase_frame = 0
                 self._phase_weights = None  # Réinit poids pour la nouvelle phase
-                # Draw the hold for this phase
+                # Draw hold duration and force intensity for this direction
                 self._hold_frames_cur = int(self.rng.integers(self.hold_min, self.hold_max + 1))
+                if self.slide_force_range is not None:
+                    self._cur_slide_force = float(self.rng.uniform(*self.slide_force_range))
             return
 
         # apply a slide step
@@ -909,6 +927,10 @@ class QuadSlideDeformer(Sofa.Core.Controller):
             if self._phase >= self._num_phases - 1:
                 # potentially a push
                 if self.push_probability > 0.0 and self.rng.random() < self.push_probability:
+                    if self.push_force_range is not None:
+                        self._cur_push_force = float(self.rng.uniform(*self.push_force_range))
+                    else:
+                        self._cur_push_force = self.push_force
                     self._doing_push = True
                     self._push_left = self.push_frames
                     return

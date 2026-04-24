@@ -1,4 +1,5 @@
 import os, uuid, numpy as np
+import threading, queue
 import Sofa, Sofa.Core
 from .forces import FORCE_TO_NEWTON
 
@@ -7,9 +8,16 @@ class AnimationRecorder(Sofa.Core.Controller):
     def __init__(self, surface_ogl_model, name="AnimationRecorder",
                  outDir="simulation_output", every=1, auto_export_frames=100,
                  force_every_frame=True, capture_images=True, image_resolution=[1920, 1080],
+                 image_every=3,           # capture image every N frames (1=every frame, 3=every 3rd)
+                 image_format='jpg',      # 'jpg' (fast) or 'png' (lossless)
+                 image_quality=92,        # JPEG quality (ignored for PNG)
                  force_debug_images=False,
                  volume_mo=None, force_sampling_k=8,
+                 record_stride=1,          # save every Nth surface vertex (1=all, 2=half, 3=third...)
                  run_name=None, images_subdir="images",
+                 # Force label representation
+                 force_label_mode: str = 'distributed',  # 'distributed' | 'intensity'
+                 deformers=None,           # list of deformer objects (needed for intensity mode)
                  # Noise configuration (forces are in Newtons at recording time)
                  force_noise_std: float = 0.0,            # absolute Gaussian std in N
                  force_noise_rel: float = 0.0,            # relative std (e.g., 0.02 for 2% of |F|)
@@ -26,7 +34,14 @@ class AnimationRecorder(Sofa.Core.Controller):
         self.capture_images = capture_images
         self.force_debug_images = force_debug_images
         self.image_resolution = image_resolution
+        self.image_every = max(1, int(image_every))
+        self.image_format = image_format.lower().strip('.')
+        self.image_quality = int(image_quality)
         self.step = 0
+        # Async image save queue (background thread to avoid blocking simulation)
+        self._img_queue = queue.Queue(maxsize=32)
+        self._img_thread = threading.Thread(target=self._image_save_worker, daemon=True)
+        self._img_thread.start()
 
         self.animation_started = False
 
@@ -46,6 +61,10 @@ class AnimationRecorder(Sofa.Core.Controller):
 
         self.volume_mo = volume_mo
         self.force_sampling_k = int(max(1, force_sampling_k))
+        self.record_stride = max(1, int(record_stride))
+        self.force_label_mode = str(force_label_mode).lower().strip()  # 'distributed' or 'intensity'
+        self._deformers = list(deformers) if deformers is not None else []
+        self._record_idx = None   # set after rest_surface is first captured
         self._force_weights_ready = False
         self._force_neighbor_idx = None
         self._force_neighbor_w = None
@@ -123,11 +142,30 @@ class AnimationRecorder(Sofa.Core.Controller):
     def _capture_rest_positions(self):
         if self.rest_surface is None and hasattr(self.surface_model, 'position'):
             if len(self.surface_model.position.value) > 0:
-                self.rest_surface = np.array(self.surface_model.position.value, np.float32)
-                print(f"Surface REST captured: {len(self.rest_surface)} vertices")
+                full = np.array(self.surface_model.position.value, np.float32)
+                self._record_idx = np.arange(0, len(full), self.record_stride)
+                self.rest_surface = full[self._record_idx]
+                print(f"Surface REST captured: {len(full)} vertices → saving {len(self.rest_surface)} (stride={self.record_stride})")
 
     def _should_capture_image(self, max_deformation):
-        return self.capture_images
+        return self.capture_images and (self.step % self.image_every == 0)
+
+    def _image_save_worker(self):
+        """Background thread: receives (img, path, quality, fmt) and saves to disk."""
+        while True:
+            item = self._img_queue.get()
+            if item is None:  # sentinel to stop
+                break
+            try:
+                img, path, quality, fmt = item
+                if fmt == 'jpg':
+                    img.save(path, format='JPEG', quality=quality, optimize=False)
+                else:
+                    img.save(path, format='PNG')
+            except Exception as e:
+                print(f"[recorder] async save failed: {e}")
+            finally:
+                self._img_queue.task_done()
 
     def _capture_rest_volume(self):
         if self.volume_mo is None:
@@ -316,6 +354,26 @@ class AnimationRecorder(Sofa.Core.Controller):
             ev = ext[idx]
             es = np.sum(ev * w[..., None], axis=1)
             es = np.nan_to_num(es, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Intensity mode: scale so the peak surface vertex reads the true total applied force
+            # instead of a tiny KNN-distributed fraction.
+            if self.force_label_mode == 'intensity' and self._deformers:
+                # Sum all deformer frame-forces to get the total applied force vector (FEM-level)
+                F_total_vec = np.zeros(3, dtype=np.float64)
+                for d in self._deformers:
+                    ff = getattr(d, '_frame_force', None)
+                    if ff is not None:
+                        if isinstance(ff, list):
+                            ff = np.array(ff, dtype=np.float32)
+                        if ff.ndim == 2 and ff.shape[1] == 3:
+                            F_total_vec += np.sum(ff, axis=0).astype(np.float64)
+                F_total = float(np.linalg.norm(F_total_vec))
+                if F_total > 1e-9:
+                    es_mag = np.linalg.norm(es, axis=1)  # (Ns,)
+                    peak = float(es_mag.max())
+                    if peak > 1e-9:
+                        es = es * (F_total / peak)
+
             return es
         except Exception:
             return None
@@ -379,7 +437,11 @@ class AnimationRecorder(Sofa.Core.Controller):
             from PIL import Image
 
             vp = gl.glGetIntegerv(gl.GL_VIEWPORT)
-            w, h = vp[2], vp[3]
+            w, h = int(vp[2]), int(vp[3])
+
+            if w <= 0 or h <= 0:
+                print(f"[capture:opengl] FAIL: viewport is {w}x{h} (window minimized or no GL context)")
+                return False
 
             gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
             pixels = gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
@@ -388,12 +450,19 @@ class AnimationRecorder(Sofa.Core.Controller):
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
             target_size = tuple(self.image_resolution)
-            img = img.resize(target_size, Image.LANCZOS)
-            img.save(image_path)
+            if (w, h) != target_size:
+                img = img.resize(target_size, Image.BILINEAR)  # BILINEAR >> LANCZOS for speed
 
+            # Queue save to background thread — don't block simulation
+            ext = 'jpg' if self.image_format == 'jpg' else 'png'
+            final_path = os.path.splitext(image_path)[0] + '.' + ext
+            try:
+                self._img_queue.put_nowait((img, final_path, self.image_quality, self.image_format))
+            except queue.Full:
+                img.save(final_path)  # fallback: save synchronously if queue full
             return True
         except Exception as e:
-            pass
+            print(f"[capture:opengl] FAIL: {type(e).__name__}: {e}")
             return False
 
     def _capture_brain_only_image(self, image_path, npz_frame_index):
@@ -406,16 +475,38 @@ class AnimationRecorder(Sofa.Core.Controller):
 
             try:
                 import Sofa.Gui as G
-                mgr = G.GUIManager.getInstance()
-                if hasattr(mgr, 'takeScreenshot'):
+                mgr = None
+                # Try different API names across SOFA versions
+                for method in ('getInstance', 'GetGUI', 'getGUI', 'get'):
+                    fn = getattr(G.GUIManager, method, None)
+                    if callable(fn):
+                        try:
+                            mgr = fn()
+                            break
+                        except Exception:
+                            pass
+                # Some versions expose the GUI directly as an attribute
+                if mgr is None:
+                    for attr in ('gui', 'GUI', '_gui'):
+                        mgr = getattr(G.GUIManager, attr, None)
+                        if mgr is not None:
+                            break
+                print(f"[capture:sofa_gui] mgr={mgr}, has takeScreenshot={hasattr(mgr, 'takeScreenshot') if mgr else False}")
+                if mgr and hasattr(mgr, 'takeScreenshot'):
                     mgr.takeScreenshot(image_path)
                     self._restore_debug_elements(hidden)
                     return True
-            except:
-                pass
+                # Last resort: SendMessage / saveScreenshot on root viewer
+                if mgr and hasattr(mgr, 'saveScreenshot'):
+                    mgr.saveScreenshot(image_path)
+                    self._restore_debug_elements(hidden)
+                    return True
+            except Exception as e:
+                print(f"[capture:sofa_gui] FAIL: {type(e).__name__}: {e}")
 
             comps = []
             self._find_viewer_components(root, comps)
+            print(f"[capture:viewer] found {len(comps)} viewer components")
             for v in comps:
                 if hasattr(v, 'saveScreenshot'):
                     v.saveScreenshot(image_path)
@@ -423,8 +514,8 @@ class AnimationRecorder(Sofa.Core.Controller):
                     return True
 
             self._restore_debug_elements(hidden)
-        except:
-            pass
+        except Exception as e:
+            print(f"[capture:brain_only] FAIL: {type(e).__name__}: {e}")
         return False
 
     def _temporarily_hide_debug_elements(self, node, hidden_objects):
@@ -484,6 +575,10 @@ class AnimationRecorder(Sofa.Core.Controller):
 
         ts = float(self.getContext().time.value)
 
+        # Apply vertex subsampling (record_stride > 1 reduces saved vertex count)
+        if self._record_idx is not None and self.record_stride > 1:
+            pos = pos[self._record_idx]
+
         self.surface_positions.append(pos)
 
         if self.rest_surface is not None:
@@ -494,13 +589,6 @@ class AnimationRecorder(Sofa.Core.Controller):
             self.surface_displacements.append(displacement)
 
         self.timestamps.append(ts)
-        surf_forces = self._compute_surface_forces()
-        if surf_forces is None:
-            self.surface_forces.append(None)
-        else:
-            fN = (surf_forces.astype(np.float32) * FORCE_TO_NEWTON)
-            fN = self._apply_force_noise(fN)
-            self.surface_forces.append(fN)
         surf_ext_forces = self._compute_surface_external_forces()
         if surf_ext_forces is None:
             self.surface_external_forces.append(None)
@@ -526,6 +614,12 @@ class AnimationRecorder(Sofa.Core.Controller):
             print(f"Auto-export at {len(self.surface_positions)} frames")
             self._export_simulation_data(auto=True)
             self.last_export_frame = self.total_frames_recorded
+            # Auto-quit after the first full export so batch sweep can continue
+            if len(self.surface_positions) >= self.auto_export_frames:
+                print(f"[recorder] {self.auto_export_frames} frames recorded – closing SOFA.")
+                self._img_queue.join()  # wait for all images to finish saving
+                import sys
+                sys.exit(0)
 
         self.step += 1
 
@@ -542,17 +636,6 @@ class AnimationRecorder(Sofa.Core.Controller):
 
         suf = '_auto' if auto else '_final'
         main = os.path.join(self.outDir, f"brain_surface_{self.session_id}{suf}.npz")
-        forces_list = []
-        has_forces = False
-        for i, f in enumerate(self.surface_forces):
-            if f is None:
-                if self.rest_surface is not None:
-                    forces_list.append(np.zeros_like(self.rest_surface, dtype=np.float32))
-                else:
-                    forces_list.append(np.zeros((0, 3), dtype=np.float32))
-            else:
-                has_forces = True
-                forces_list.append(f.astype(np.float32))
         ext_forces_list = []
         has_ext_forces = False
         for i, f in enumerate(self.surface_external_forces):
@@ -570,57 +653,6 @@ class AnimationRecorder(Sofa.Core.Controller):
             displacements=np.stack(self.surface_displacements),
             times=np.array(self.timestamps, np.float32)
         )
-
-        force_quality_summary = None
-        if has_forces:
-            forces_arr = np.stack(forces_list)
-            save_kwargs['surface_forces'] = forces_arr
-            try:
-                norms = np.linalg.norm(forces_arr, axis=2)
-                frame_max = norms.max(axis=1)
-                frame_mean = norms.mean(axis=1)
-                frame_p95 = np.percentile(norms, 95, axis=1)
-                nonfinite = (~np.isfinite(forces_arr)).sum(axis=(1, 2))
-                zeros = (norms <= 1e-12).sum(axis=1)
-                if frame_max.shape[0] > 1:
-                    prev = np.maximum(frame_max[:-1], 1e-9)
-                    spikes = int(np.sum((frame_max[1:] > 10.0 * prev) & (frame_max[1:] > 1e-6)))
-                else:
-                    spikes = 0
-                zero_frames = int(np.sum(frame_max <= 1e-12))
-
-                mapping_ok = True
-                if hasattr(self, '_force_mapping_info'):
-                    info = self._force_mapping_info
-                    Ns = max(1, info.get('Ns', 1))
-                    fb = info.get('fallback_rows', 0)
-                    rmin = info.get('row_sum_min', 0.0)
-                    rmax = info.get('row_sum_max', 0.0)
-                    mapping_ok = (rmin > 0.98 and rmax < 1.02 and (fb / Ns) <= 0.05)
-                numeric_ok = (int(np.sum(nonfinite)) == 0) and (zero_frames < len(self.timestamps))
-                temporal_ok = (spikes <= max(1, len(self.timestamps) // 10))
-
-                force_quality_summary = {
-                    'overall_max': float(np.max(frame_max)) if frame_max.size else 0.0,
-                    'overall_mean_of_means': float(np.mean(frame_mean)) if frame_mean.size else 0.0,
-                    'overall_mean_p95': float(np.mean(frame_p95)) if frame_p95.size else 0.0,
-                    'total_nonfinite_elements': int(np.sum(nonfinite)),
-                    'zero_frames': zero_frames,
-                    'spike_frames': spikes,
-                    'frames': len(self.timestamps),
-                    'mapping_ok': bool(mapping_ok),
-                    'numeric_ok': bool(numeric_ok),
-                    'temporal_ok': bool(temporal_ok),
-                }
-
-                qcsv = os.path.join(self.outDir, f"brain_surface_{self.session_id}{suf}_force_quality.csv")
-                with open(qcsv, 'w') as qf:
-                    qf.write('frame,max_norm_N,mean_norm_N,p95_norm_N,zero_count,nonfinite_count\n')
-                    for i in range(norms.shape[0]):
-                        qf.write(f"{i},{float(frame_max[i]):.6f},{float(frame_mean[i]):.6f},{float(frame_p95[i]):.6f},{int(zeros[i])},{int(nonfinite[i])}\n")
-                print(f"Force quality CSV exported: {qcsv}")
-            except Exception:
-                pass
 
         ext_force_quality_summary = None
         if has_ext_forces:
@@ -664,28 +696,23 @@ class AnimationRecorder(Sofa.Core.Controller):
                 pass
 
         np.savez_compressed(main, **save_kwargs)
-        print(f"NPZ surface exported with displacements{(' and forces' if has_forces else '')}{(' and external_forces' if has_ext_forces else '')}: {len(self.surface_positions)} frames -> {main}")
+        print(f"NPZ exported{(' with external_forces' if has_ext_forces else ' (no external forces)')}: {len(self.surface_positions)} frames → {main}")
 
         csv_file = os.path.join(self.outDir, f"brain_surface_{self.session_id}{suf}_summary.csv")
         with open(csv_file, 'w') as f:
-            f.write("frame,time,max_displacement_mm,max_force_N,max_external_force_N\n")
+            f.write("frame,time,max_displacement_mm,max_external_force_N\n")
             for i, t in enumerate(self.timestamps):
                 if i < len(self.surface_displacements):
                     disp = self.surface_displacements[i]
                     max_d = float(np.max(np.linalg.norm(disp, axis=1)))
                 else:
                     max_d = 0.0
-                if i < len(self.surface_forces) and self.surface_forces[i] is not None:
-                    fcur = self.surface_forces[i]
-                    max_f = float(np.max(np.linalg.norm(fcur, axis=1)))
-                else:
-                    max_f = 0.0
                 if i < len(self.surface_external_forces) and self.surface_external_forces[i] is not None:
                     efcur = self.surface_external_forces[i]
                     max_ef = float(np.max(np.linalg.norm(efcur, axis=1)))
                 else:
                     max_ef = 0.0
-                f.write(f"{i},{t:.6f},{max_d:.6f},{max_f:.6f},{max_ef:.6f}\n")
+                f.write(f"{i},{t:.6f},{max_d:.6f},{max_ef:.6f}\n")
         print(f"CSV summary exported: {csv_file}")
 
         meta = os.path.join(self.outDir, f"brain_surface_{self.session_id}{suf}_meta.json")
@@ -695,24 +722,23 @@ class AnimationRecorder(Sofa.Core.Controller):
             'frame_count': len(self.timestamps),
             'duration': float(self.timestamps[-1]) if self.timestamps else 0.0,
             'surface_vertex_count': len(self.rest_surface) if self.rest_surface is not None else 0,
+            'image_every': self.image_every,
+            'image_format': self.image_format,
+            'record_stride': self.record_stride,
             'data_type': 'surface_mesh_positions_displacements_forces',
             'npz_keys': ['rest', 'frames', 'displacements', 'times'] +
-                        (['surface_forces'] if ('surface_forces' in save_kwargs) else []) +
                         (['surface_external_forces'] if ('surface_external_forces' in save_kwargs) else [])
         }
         if hasattr(self, '_force_mapping_info') and isinstance(getattr(self, '_force_mapping_info'), dict):
             m['force_mapping'] = self._force_mapping_info
             m['force_mapping']['note'] = 'row_sum near 1.0 indicates normalized gather weights; fallback_rows > 0 means KNN was used for some vertices.'
-        if force_quality_summary is not None:
-            m['force_quality'] = force_quality_summary
-        if 'surface_external_forces' in save_kwargs and 'ext_force_quality_summary' in locals() and ext_force_quality_summary is not None:
+        if 'surface_external_forces' in save_kwargs and ext_force_quality_summary is not None:
             m['external_force_quality'] = ext_force_quality_summary
         m['units'] = {
             "length": "mm",
             "time": "s",
             "mass": "kg",
             "displacement": "mm",
-            "surface_forces": "N",
             "surface_external_forces": "N",
             "force_to_newton": FORCE_TO_NEWTON
         }
