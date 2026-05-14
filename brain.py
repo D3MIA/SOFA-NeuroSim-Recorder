@@ -209,6 +209,7 @@ def createScene(root):
         volume_mo=br.dofs,
         force_sampling_k=8,
         record_stride=2,            # save every 2nd vertex: 40k → 20k (2× less data, same quality)
+        camera_component=interactive_camera,  # filter to camera-visible surface vertices only
         run_name=run_subdir,
         # Noise knobs
         force_noise_std=force_noise_std_N,
