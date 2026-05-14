@@ -395,6 +395,82 @@ class NPZDirectProjector:
         print(f"      Sauvegarde incrémentale frame {frame_idx}: {os.path.basename(output_file)}")
         return output_file
 
+    # -------------------- Pixel-space rasterization --------------------
+
+    def _rasterize_frame(self, pixel_coords, visibility_mask, depth_values, forces_3d, out_H, out_W):
+        """Z-buffer rasterize one frame's visible vertices onto an (out_H, out_W) pixel grid.
+
+        For each pixel the nearest vertex (smallest NDC depth) wins.
+        Pixels with no vertex remain zero.
+
+        Returns:
+            force_map : (out_H, out_W, 3) float32  — 3-D force vector per pixel
+            covered   : (out_H, out_W) bool         — True where a vertex was rasterized
+        """
+        force_map = np.zeros((out_H, out_W, 3), dtype=np.float32)
+        covered   = np.zeros((out_H, out_W), dtype=bool)
+
+        if forces_3d is None or not np.any(visibility_mask):
+            return force_map, covered
+
+        scale_x = out_W / self.screen_width
+        scale_y = out_H / self.screen_height
+
+        vis = visibility_mask.astype(bool)
+        px = pixel_coords[vis, 0] * scale_x
+        py = pixel_coords[vis, 1] * scale_y
+        d  = depth_values[vis]               # NDC depth: smaller = closer to camera
+        F  = forces_3d[vis].astype(np.float32)
+
+        pxi = np.floor(px).astype(np.int32)
+        pyi = np.floor(py).astype(np.int32)
+
+        in_bounds = (pxi >= 0) & (pxi < out_W) & (pyi >= 0) & (pyi < out_H)
+        pxi, pyi, d, F = pxi[in_bounds], pyi[in_bounds], d[in_bounds], F[in_bounds]
+
+        if len(pxi) == 0:
+            return force_map, covered
+
+        lin   = pyi * out_W + pxi             # flat pixel index
+        order = np.argsort(d)                 # ascending: nearest vertex first
+        lin_s, F_s = lin[order], F[order]
+
+        # np.unique returns first occurrence per unique value → nearest vertex per pixel
+        _, first = np.unique(lin_s, return_index=True)
+
+        flat_f = force_map.reshape(-1, 3)
+        flat_c = covered.reshape(-1)
+        flat_f[lin_s[first]] = F_s[first]
+        flat_c[lin_s[first]] = True
+
+        return force_map, covered
+
+    def _fill_holes(self, force_map, covered, max_dist=10):
+        """Nearest-neighbor hole filling inside the object silhouette.
+
+        Each uncovered pixel within max_dist pixels of a covered pixel is
+        assigned the force of its nearest covered neighbour.  Pixels farther
+        than max_dist from any surface vertex are treated as background and
+        remain zero.
+        """
+        if not np.any(covered) or np.all(covered):
+            return force_map
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except ImportError:
+            print("[rasterize] scipy unavailable — hole filling skipped")
+            return force_map
+
+        dist, nearest = distance_transform_edt(
+            ~covered, return_distances=True, return_indices=True
+        )
+        fill = ~covered & (dist <= max_dist)
+        if not np.any(fill):
+            return force_map
+        fy, fx = nearest[0][fill], nearest[1][fill]
+        force_map[fill] = force_map[fy, fx]
+        return force_map
+
     # -------------------- Traitement principal --------------------
 
     def process_npz_file(self, npz_file):
@@ -422,6 +498,14 @@ class NPZDirectProjector:
             surface_external_forces = data.get('surface_external_forces', None)
 
             n_frames, n_vertices, _ = frames.shape
+
+            # Rasterized pixel-force maps at half the camera viewport resolution
+            out_H = self.screen_height // 2   # 540 for a 1080p camera
+            out_W = self.screen_width  // 2   # 960 for a 1920p camera
+            raster_force_map = np.zeros((n_frames, out_H, out_W, 3), dtype=np.float32)
+            raster_force_mag = np.zeros((n_frames, out_H, out_W),    dtype=np.float32)
+            print(f"   Pixel-force maps: {n_frames}×{out_H}×{out_W} "
+                  f"({raster_force_map.nbytes / 1e9:.1f} GB pre-allocated)")
 
             # Detect image_every from meta.json in the same folder
             image_every = 1
@@ -499,10 +583,23 @@ class NPZDirectProjector:
                 visibility_masks[frame_idx] = visibility_mask
                 depth_values[frame_idx] = depths
 
+                # Rasterize forces onto the pixel grid for this frame
+                forces_frame = (surface_external_forces[frame_idx]
+                                if surface_external_forces is not None else None)
+                fmap, cov = self._rasterize_frame(
+                    pixel_coords, visibility_mask, depths, forces_frame, out_H, out_W
+                )
+                fmap = self._fill_holes(fmap, cov, max_dist=10)
+                raster_force_map[frame_idx] = fmap
+                raster_force_mag[frame_idx] = np.linalg.norm(fmap, axis=-1).astype(np.float32)
+
                 if (frame_idx + 1) % 10 == 0:
-                    vis_count = int(np.sum(visibility_mask))
-                    vis_rate = (vis_count / len(visibility_mask) * 100.0) if len(visibility_mask) else 0.0
-                    print(f"      Frame {frame_idx+1}/{n_frames}: {vis_count}/{len(visibility_mask)} visibles ({vis_rate:.1f}%)")
+                    vis_count  = int(np.sum(visibility_mask))
+                    vis_rate   = (vis_count / len(visibility_mask) * 100.0) if len(visibility_mask) else 0.0
+                    n_covered  = int(np.sum(cov))
+                    total_pix  = out_H * out_W
+                    print(f"      Frame {frame_idx+1}/{n_frames}: {vis_count}/{len(visibility_mask)} vertices visible ({vis_rate:.1f}%), "
+                          f"{n_covered}/{total_pix} pixels covered ({n_covered/total_pix*100:.1f}%)")
 
                 if (frame_idx + 1) % self.backup_interval == 0:
                     print(f"   Sauvegarde incrémentale à la frame {frame_idx+1}...")
@@ -528,7 +625,10 @@ class NPZDirectProjector:
                 'frames': frames,
                 'projected_pixels': projected_pixels,
                 'visibility_masks': visibility_masks,
-                'depth_values': depth_values
+                'depth_values': depth_values,
+                # Dense pixel-space force maps (H×W per frame, background = 0)
+                'pixel_force_map':       raster_force_map,   # (T, H, W, 3) float32
+                'pixel_force_magnitude': raster_force_mag,   # (T, H, W)    float32
             }
             if rest_positions is not None:
                 final_data['rest'] = rest_positions
@@ -573,11 +673,25 @@ class NPZDirectProjector:
                     'total_vertices': total_vertices,
                     'total_visible': total_visible,
                     'visibility_rate': float(overall_visibility),
-                    'backup_interval': int(self.backup_interval)
+                    'backup_interval': int(self.backup_interval),
+                },
+                'pixel_force_map_info': {
+                    'shape': [int(n_frames), int(out_H), int(out_W)],
+                    'resolution': f'{out_W}x{out_H}',
+                    'hole_fill_max_dist_px': 10,
+                    'background_value': 0.0,
+                    'keys': ['pixel_force_map', 'pixel_force_magnitude'],
+                    'note': (
+                        'pixel_force_map (T,H,W,3): 3-D force vector per pixel. '
+                        'pixel_force_magnitude (T,H,W): ||F|| per pixel. '
+                        'Background and non-surface pixels are zero. '
+                        'Holes within 10 px of a surface vertex are filled by nearest-neighbor.'
+                    ),
                 },
                 'npz_keys': {
                     'original': list(data.files),
-                    'added': ['projected_pixels', 'visibility_masks', 'depth_values', 'image_frame_indices'],
+                    'added': ['projected_pixels', 'visibility_masks', 'depth_values',
+                              'image_frame_indices', 'pixel_force_map', 'pixel_force_magnitude'],
                     'carried_over': [k for k in ['rest', 'displacements', 'times', 'surface_external_forces'] if k in data.files]
                 },
                 'data_units': {

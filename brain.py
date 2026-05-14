@@ -198,7 +198,7 @@ def createScene(root):
         surface_ogl_model=surface_model,
         every=1,
         force_every_frame=True,
-        auto_export_frames=2000,
+        auto_export_frames=1000,
         capture_images=True,
         image_every=3,              # capture image every 3 frames → 3× less GPU stall
         image_format='jpg',         # JPEG: ~5× faster to write than PNG
