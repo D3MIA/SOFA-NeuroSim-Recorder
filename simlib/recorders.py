@@ -15,6 +15,8 @@ class AnimationRecorder(Sofa.Core.Controller):
                  volume_mo=None, force_sampling_k=8,
                  record_stride=1,          # save every Nth surface vertex (1=all, 2=half, 3=third...)
                  run_name=None, images_subdir="images",
+                 # Camera component for visibility-based vertex filtering
+                 camera_component=None,   # SOFA InteractiveCamera; if set, only camera-visible surface vertices are saved
                  # Force label representation
                  force_label_mode: str = 'distributed',  # 'distributed' | 'intensity'
                  deformers=None,           # list of deformer objects (needed for intensity mode)
@@ -65,6 +67,7 @@ class AnimationRecorder(Sofa.Core.Controller):
         self.force_label_mode = str(force_label_mode).lower().strip()  # 'distributed' or 'intensity'
         self._deformers = list(deformers) if deformers is not None else []
         self._record_idx = None   # set after rest_surface is first captured
+        self._camera_component = camera_component  # optional: filter to camera-visible vertices only
         self._force_weights_ready = False
         self._force_neighbor_idx = None
         self._force_neighbor_w = None
@@ -139,13 +142,106 @@ class AnimationRecorder(Sofa.Core.Controller):
         except Exception:
             return F
 
+    def _quat_to_rotation_matrix(self, q):
+        """Quaternion [qx, qy, qz, qw] → 3×3 rotation matrix."""
+        q = np.asarray(q, dtype=np.float64)
+        n = np.linalg.norm(q)
+        if n > 1e-12:
+            q = q / n
+        qx, qy, qz, qw = q
+        return np.array([
+            [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
+            [2*(qx*qy + qz*qw),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw)],
+            [2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),   1 - 2*(qx*qx + qy*qy)],
+        ], dtype=np.float64)
+
+    def _compute_camera_visible_indices(self, vertices):
+        """Return indices (into `vertices`) of surface vertices visible from the camera.
+
+        Uses pinhole backprojection with the camera's intrinsic and extrinsic
+        parameters (position + quaternion orientation).  Visibility is determined
+        at rest pose and kept fixed for the entire recording session — a valid
+        approximation for the small deformations produced by SOFA brain surgery
+        simulations.
+
+        Returns None if the camera component is unavailable or projection fails,
+        so the caller can fall back to saving all stride-subsampled vertices.
+        """
+        if self._camera_component is None:
+            return None
+        try:
+            pos = np.array(self._camera_component.position.value, dtype=np.float64)
+            ori = np.array(self._camera_component.orientation.value, dtype=np.float64)
+            fov = float(self._camera_component.fieldOfView.value)
+            W = int(self._camera_component.widthViewport.value)
+            H = int(self._camera_component.heightViewport.value)
+            znear = 0.1
+            if hasattr(self._camera_component, 'zNear'):
+                try:
+                    znear = float(self._camera_component.zNear.value)
+                except Exception:
+                    pass
+
+            # Camera-space axes from quaternion
+            R = self._quat_to_rotation_matrix(ori)
+            forward = -R[:, 2]   # camera looks along -Z in OpenGL
+            right   =  R[:, 0]
+            up      =  R[:, 1]
+
+            # Build 4×4 view matrix
+            view = np.array([
+                [right[0],    right[1],    right[2],   -np.dot(right,   pos)],
+                [up[0],       up[1],       up[2],      -np.dot(up,      pos)],
+                [-forward[0], -forward[1], -forward[2], np.dot(forward, pos)],
+                [0, 0, 0, 1],
+            ], dtype=np.float64)
+
+            V = np.asarray(vertices, dtype=np.float64)
+            N = len(V)
+            Vh = np.concatenate([V, np.ones((N, 1), dtype=np.float64)], axis=1)
+            Vview = Vh @ view.T  # (N, 4)
+
+            # Intrinsics derived from horizontal FOV (matches camera.py convention)
+            fx = fy = (W / 2.0) / np.tan(np.radians(fov / 2.0))
+            cx, cy = W / 2.0, H / 2.0
+
+            # Visibility: vertex must be in front of the near plane
+            in_front = Vview[:, 2] < -znear  # OpenGL: camera looks -Z
+
+            # Perspective projection to pixel coordinates
+            pos_depth = np.where(in_front, -Vview[:, 2], 1.0)   # positive depth
+            px = np.where(in_front,  fx * Vview[:, 0] / pos_depth + cx, -1.0)
+            # Y-axis: OpenGL y-up → image y-down flip
+            py = np.where(in_front, -fy * Vview[:, 1] / pos_depth + cy, -1.0)
+
+            in_image = in_front & (px >= 0.0) & (px < W) & (py >= 0.0) & (py < H)
+            visible_idx = np.where(in_image)[0]
+            return visible_idx
+
+        except Exception as e:
+            print(f"[AnimationRecorder] Camera visibility filter failed: {e}")
+            return None
+
     def _capture_rest_positions(self):
         if self.rest_surface is None and hasattr(self.surface_model, 'position'):
             if len(self.surface_model.position.value) > 0:
                 full = np.array(self.surface_model.position.value, np.float32)
-                self._record_idx = np.arange(0, len(full), self.record_stride)
+                stride_idx = np.arange(0, len(full), self.record_stride)
+
+                # Apply camera-visibility filter on top of stride subsampling
+                vis_idx = self._compute_camera_visible_indices(full[stride_idx])
+                if vis_idx is not None and len(vis_idx) > 0:
+                    self._record_idx = stride_idx[vis_idx]
+                    print(f"Surface REST captured: {len(full)} vertices → {len(stride_idx)} after stride={self.record_stride} → {len(self._record_idx)} camera-visible")
+                else:
+                    # Fallback: keep all stride-subsampled vertices
+                    self._record_idx = stride_idx
+                    if vis_idx is not None and len(vis_idx) == 0:
+                        print(f"[AnimationRecorder] WARNING: camera visibility returned 0 vertices; falling back to stride-only ({len(stride_idx)} vertices)")
+                    else:
+                        print(f"Surface REST captured: {len(full)} vertices → saving {len(self._record_idx)} (stride={self.record_stride}, no camera filter)")
+
                 self.rest_surface = full[self._record_idx]
-                print(f"Surface REST captured: {len(full)} vertices → saving {len(self.rest_surface)} (stride={self.record_stride})")
 
     def _should_capture_image(self, max_deformation):
         return self.capture_images and (self.step % self.image_every == 0)
@@ -725,6 +821,7 @@ class AnimationRecorder(Sofa.Core.Controller):
             'image_every': self.image_every,
             'image_format': self.image_format,
             'record_stride': self.record_stride,
+            'camera_visibility_filter': self._camera_component is not None,
             'data_type': 'surface_mesh_positions_displacements_forces',
             'npz_keys': ['rest', 'frames', 'displacements', 'times'] +
                         (['surface_external_forces'] if ('surface_external_forces' in save_kwargs) else [])

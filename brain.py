@@ -198,7 +198,7 @@ def createScene(root):
         surface_ogl_model=surface_model,
         every=1,
         force_every_frame=True,
-        auto_export_frames=2000,
+        auto_export_frames=1000,
         capture_images=True,
         image_every=3,              # capture image every 3 frames → 3× less GPU stall
         image_format='jpg',         # JPEG: ~5× faster to write than PNG
@@ -209,6 +209,7 @@ def createScene(root):
         volume_mo=br.dofs,
         force_sampling_k=8,
         record_stride=2,            # save every 2nd vertex: 40k → 20k (2× less data, same quality)
+        camera_component=interactive_camera,  # filter to camera-visible surface vertices only
         run_name=run_subdir,
         # Noise knobs
         force_noise_std=force_noise_std_N,
