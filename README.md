@@ -13,10 +13,11 @@ This repository covers **simulation, recording, and dataset export** only. Force
 </p>
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/YOUR-UUID" controls width="720"></video>
+  <video src="https://github.com/user-attachments/assets/0c669e0e-5f8b-4272-acf2-785209974e51" controls width="720"></video>
   <br/>
   <em>Example — SOFA brain surface deformation during simulated tool–tissue interaction.</em>
 </p>
+
 
 ---
 
