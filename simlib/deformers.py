@@ -903,7 +903,7 @@ class QuadSlideDeformer(Sofa.Core.Controller):
             if self._release_left <= 0:
                 self._in_release = False
                 self._phase_frame = 0
-                self._phase_weights = None  # Réinit poids pour la nouvelle phase
+                self._phase_weights = None  # Reset weights for the new phase
                 # Draw hold duration and force intensity for this direction
                 self._hold_frames_cur = int(self.rng.integers(self.hold_min, self.hold_max + 1))
                 if self.slide_force_range is not None:

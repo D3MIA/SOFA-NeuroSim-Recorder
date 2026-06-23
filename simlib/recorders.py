@@ -513,14 +513,14 @@ class AnimationRecorder(Sofa.Core.Controller):
 
         return False
     def _create_clean_debug_image(self, image_path, npz_frame_index):
-        # Fallback: simple image noire avec le numéro de frame
+        # Fallback: plain black image with frame number
         try:
             from PIL import Image, ImageDraw, ImageFont
             w, h = int(self.image_resolution[0]), int(self.image_resolution[1])
             img = Image.new('RGB', (w, h), (0, 0, 0))
             draw = ImageDraw.Draw(img)
             text = f"DEBUG FALLBACK\nframe {npz_frame_index:04d}"
-            # Police par défaut
+            # Default font
             draw.text((20, 20), text, fill=(220, 220, 220))
             img.save(image_path)
             return True

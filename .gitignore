@@ -5,3 +5,12 @@ projection_chunks.py
 /tools/detect_craniotomy.py
 /run*
 /datasets*
+
+*.mp4
+docs/videos/
+deformations_SOFA.mp4
+
+__pycache__/
+*.pyc
+.venv/
+.env

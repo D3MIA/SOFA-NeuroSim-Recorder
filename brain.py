@@ -11,8 +11,8 @@ from simlib import (
 def createScene(root):
    
     # ── Simulation parameters (overridable via environment variables) ──────────
-    YOUNG   = float(os.environ.get("BRAIN_YOUNG",   "3.0"))   # kPa  (internal unit = kPa in mm/kg/s)
-    POISSON = float(os.environ.get("BRAIN_POISSON", "0.45"))  # dimensionless
+    YOUNG   = float(os.environ.get("BRAIN_YOUNG",   "0.5"))   # kPa  (internal unit = kPa in mm/kg/s)
+    POISSON = float(os.environ.get("BRAIN_POISSON", "0.40"))  # dimensionless
     SEED    = int(os.environ.get("BRAIN_SEED",     "1111"))   # RNG seed
     print(f"[brain.py] E={YOUNG} kPa  nu={POISSON}  seed={SEED}")
     # ────────────────────────────────────────────────────────────────────────────
@@ -86,9 +86,9 @@ def createScene(root):
         n=[16, 16, 16],
     )
     br.addObject("MechanicalObject", name="dofs")
-    br.addObject("UniformMass", totalMass=1.25)  # ~1.04 g/cm³ × 1200 cm³ ≈ 1.25 kg
+    br.addObject("UniformMass", totalMass=1)  # ~1.04 g/cm³ × 1200 cm³ ≈ 1.25 kg
     br.addObject("ParallelTetrahedronFEMForceField", youngModulus=YOUNG, poissonRatio=POISSON)
-    br.addObject("DiagonalVelocityDampingForceField", dampingCoefficient=1.5)  # scaled with stiffness: ~1.5 N·s/m equivalent
+    br.addObject("DiagonalVelocityDampingForceField", dampingCoefficient=2)  # scaled with stiffness: ~1.5 N·s/m equivalent
 
     vis = br.addChild("Visual")
     # Prefer decimated mesh if available; fallback to full-resolution mesh
@@ -230,7 +230,7 @@ def createScene(root):
         os.path.exists(os.path.join("data", "craniotomy_region_texture.npz"))
         and os.path.join("data", "craniotomy_region_texture.npz")
     ) or None
-    # region_npz est déjà préparé plus haut dans brain.py
+    # region_npz is resolved above in createScene()
     
     tool = QuadSlideDeformer(
         mo=br.dofs,
@@ -241,7 +241,7 @@ def createScene(root):
 
         # Sliding gesture timing  (dt=0.03s → 1 frame = 30 ms)
         slide_displacement=10.0,
-        slide_force_range=(200, 1000),  # 0.20–1.00 N, drawn fresh each direction
+        slide_force_range=(100, 200),  # 0.10–0.20 N, drawn fresh each direction
         ramp_in=8,                  # 0.24 s smooth ramp up
         hold_frames=15,             # nominal hold (overridden by hold_min/max)
         hold_min=10, hold_max=20,   # 0.30–0.60 s varied sustained contact
@@ -254,7 +254,7 @@ def createScene(root):
 
         # Occasional push for gesture variety
         push_probability=0.2,       # 20% chance of a push after each full sequence
-        push_force_range=(150, 800),  # 0.15–0.80 N total, normalized across nodes
+        push_force_range=(100, 200),  # 0.10–0.20 N total, normalized across nodes
         push_radius=20.0,           # mm – matches slide radius for consistent tool size
         push_frames=15,             # 0.45 s sustained push
 
@@ -269,7 +269,7 @@ def createScene(root):
     br.addObject(aggregator)
     recorder._deformers = [tool]   # wire deformer into recorder after tool is instantiated
 
-    # Pour tester un appui profond, décommentez ce bloc:
+    # To test a deep press gesture, uncomment the block below:
     # press = DeepPressPusher(
     #     mo=br.dofs,
     #     surface_model=surface_model,

@@ -22,7 +22,7 @@ class DatasetFrameModifier:
         self.noise_percentage = noise_percentage
         self.displacement_noise = displacement_noise
         
-        logger.info(f"🎲 Frame Modifier configured:")
+        logger.info("Frame modifier configured:")
         logger.info(f"   - {noise_percentage*100:.1f}% of points noised per frame")
         logger.info(f"   - ±{displacement_noise*100:.1f}% of displacement range")
     
@@ -106,7 +106,7 @@ class DatasetFrameModifier:
     def modify_dataset_file(self, input_npz_path, output_npz_path, modify_ratio=0.3):
         """Modifies existing frames in a dataset file with noise"""
         
-        logger.info(f"📦 Modifying: {input_npz_path.name}")
+        logger.info(f"Modifying: {input_npz_path.name}")
         
         # Load original data
         data = np.load(input_npz_path)
@@ -147,7 +147,7 @@ class DatasetFrameModifier:
         stats_dy_ranges = []
         
         # Progress bar
-        pbar = tqdm(modify_frames, desc="🎲 Modifying frames", leave=False)
+        pbar = tqdm(modify_frames, desc="Modifying frames", leave=False)
         
         for t_idx in pbar:
             # Modify this frame IN PLACE
@@ -212,10 +212,10 @@ class DatasetFrameModifier:
         avg_dx_range = np.mean(stats_dx_ranges) if stats_dx_ranges else 0
         avg_dy_range = np.mean(stats_dy_ranges) if stats_dy_ranges else 0
         
-        logger.info(f"   ✅ Saved: {output_npz_path}")
-        logger.info(f"   📊 Modified: {len(modify_frames)} frames out of {n_total}")
-        logger.info(f"   🎲 Noisy points: {total_noise_points}")
-        logger.info(f"   📏 Avg range: dx={avg_dx_range:.5f}, dy={avg_dy_range:.5f}")
+        logger.info(f"   Saved: {output_npz_path}")
+        logger.info(f"   Modified: {len(modify_frames)} frames out of {n_total}")
+        logger.info(f"   Noisy points: {total_noise_points}")
+        logger.info(f"   Avg range: dx={avg_dx_range:.5f}, dy={avg_dy_range:.5f}")
         
         return output_npz_path
     
@@ -233,17 +233,17 @@ class DatasetFrameModifier:
             for pattern in exclude_patterns:
                 npz_files = [f for f in npz_files if pattern not in str(f)]
         
-        logger.info(f"🎯 Frame modification of {len(npz_files)} datasets")
-        logger.info(f"📁 Input: {input_path}")
-        logger.info(f"📁 Output: {output_path}")
-        logger.info(f"📊 {modify_ratio*100:.1f}% of frames will be modified per dataset")
+        logger.info(f"Frame modification of {len(npz_files)} datasets")
+        logger.info(f"Input: {input_path}")
+        logger.info(f"Output: {output_path}")
+        logger.info(f"{modify_ratio*100:.1f}% of frames will be modified per dataset")
         
         modified_files = []
         
-        main_pbar = tqdm(npz_files, desc="📦 Datasets")
+        main_pbar = tqdm(npz_files, desc="Datasets")
         
         for npz_file in main_pbar:
-            main_pbar.set_description(f"📦 {npz_file.name[:30]}")
+            main_pbar.set_description(npz_file.name[:30])
             
             relative_path = npz_file.relative_to(input_path)
             output_file = output_path / relative_path
@@ -257,10 +257,10 @@ class DatasetFrameModifier:
                 modified_files.append(modified_file)
                 
             except Exception as e:
-                logger.error(f"❌ Error {npz_file.name}: {e}")
+                logger.error(f"Error {npz_file.name}: {e}")
                 continue
         
-        logger.info(f"✅ {len(modified_files)} datasets modified successfully")
+        logger.info(f"{len(modified_files)} datasets modified successfully")
         
         return modified_files
 
@@ -290,9 +290,9 @@ def main():
         modify_ratio=args.modify_ratio
     )
     
-    logger.info(f"🎉 Frame modification completed!")
-    logger.info(f"📊 {len(modified_files)} datasets with modified frames created")
-    logger.info(f"📁 Directory: {args.output_dir}")
+    logger.info("Frame modification completed.")
+    logger.info(f"{len(modified_files)} datasets with modified frames created")
+    logger.info(f"Directory: {args.output_dir}")
 
 
 if __name__ == '__main__':

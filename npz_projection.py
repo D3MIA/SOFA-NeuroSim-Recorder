@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# npz_projection.py — Projection directe sur NPZ avec sauvegarde incrémentale (version patchée)
+# npz_projection.py — Direct projection on NPZ with incremental saving
 
 import os
 import json
@@ -10,41 +10,41 @@ import glob
 import fnmatch
 
 class NPZDirectProjector:
-    """Projecteur 3D→Pixel direct sur fichiers NPZ avec sauvegarde incrémentale"""
+    """Direct 3D→Pixel projector on NPZ files with incremental saving"""
 
     def __init__(self, camera_params_file=None, backup_interval=50):
         self.session_id = str(uuid.uuid4())[:8]
         self.backup_interval = int(max(1, backup_interval))
 
-        # Chargement paramètres caméra SOFA réels
+        # Load real SOFA camera parameters
         self.camera_params = self._load_real_camera_params(camera_params_file)
 
-        # Dimensions initiales (par défaut) depuis la caméra.
-        # Elles seront recalées par run dans process_npz_file().
+        # Initial dimensions (default) from camera.
+        # They will be adjusted per run in process_npz_file().
         self.screen_width = int(self.camera_params['viewport_width'])
         self.screen_height = int(self.camera_params['viewport_height'])
         self.resolution_source = 'camera'
 
-        print(f"NPZDirectProjector {self.session_id} - PROJECTION DIRECTE NPZ")
-        print(f"   Sauvegarde incrémentale: toutes les {self.backup_interval} frames sur le même fichier")
-        print(f"NPZDirectProjector {self.session_id} - PROJECTION DIRECTE NPZ")
-        print(f"   Camera SOFA InteractiveCamera - MATRICES PRE-CALCULEES")
+        print(f"NPZDirectProjector {self.session_id} - DIRECT NPZ PROJECTION")
+        print(f"   Incremental save: every {self.backup_interval} frames to the same file")
+        print(f"NPZDirectProjector {self.session_id} - DIRECT NPZ PROJECTION")
+        print(f"   SOFA InteractiveCamera - PRE-COMPUTED MATRICES")
         p = self.camera_params['position']; q = self.camera_params['orientation']
         print(f"   Position: [{p[0]:.1f}, {p[1]:.1f}, {p[2]:.1f}]")
         print(f"   Quaternion: [{q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f}]")
-        print(f"   Viewport REEL: {self.screen_width}x{self.screen_height}")
+        print(f"   REAL Viewport: {self.screen_width}x{self.screen_height}")
         print(f"   FOV: {self.camera_params['field_of_view']:.1f}°")
-        print(f"   Sauvegarde incrémentale: toutes les {self.backup_interval} frames sur le même fichier")
+        print(f"   Incremental save: every {self.backup_interval} frames to the same file")
 
-        # Dossier de sortie
+        # Output folder
         self.output_dir = "projected_npz"
         os.makedirs(self.output_dir, exist_ok=True)
-        print(f"   Dossier sortie: {self.output_dir}/")
+        print(f"   Output folder: {self.output_dir}/")
 
-    # -------------------- Chargement & détection --------------------
+    # -------------------- Loading & detection --------------------
 
     def _detect_dataset_image_resolution(self, run_dir=None):
-        """Détecte la résolution des images exportées (priorité au dossier du run)."""
+        """Detect exported image resolution (run folder takes priority)."""
         try:
             img_dir = None
             if run_dir is not None:
@@ -72,7 +72,7 @@ class NPZDirectProjector:
                 from PIL import Image
                 with Image.open(candidates[0]) as im:
                     w, h = im.size
-                    print(f"   Résolution images détectée ({os.path.relpath(img_dir)}): {w}x{h}")
+                    print(f"   Detected image resolution ({os.path.relpath(img_dir)}): {w}x{h}")
                     return (w, h)
             except Exception:
                 return None
@@ -80,8 +80,8 @@ class NPZDirectProjector:
             return None
 
     def _load_real_camera_params(self, camera_params_file):
-        """Charge les paramètres RÉELS de la caméra SOFA InteractiveCamera"""
-        print("Chargement paramètres caméra SOFA RÉELS...")
+        """Load REAL SOFA InteractiveCamera parameters"""
+        print("Loading REAL SOFA camera parameters...")
 
         if camera_params_file is None:
             camera_params_file = self._find_latest_camera_params()
@@ -91,9 +91,9 @@ class NPZDirectProjector:
                 with open(camera_params_file, 'r') as f:
                     data = json.load(f)
 
-                print(f"   Fichier chargé: {os.path.basename(camera_params_file)}")
+                print(f"   File loaded: {os.path.basename(camera_params_file)}")
 
-                # Extraction des paramètres essentiels (supporte ancien et nouveau format)
+                # Extract essential parameters (supports old and new format)
                 params = data.get("essential_params", data)
 
                 cam = {
@@ -128,7 +128,7 @@ class NPZDirectProjector:
                 elif 'intrinsics' in params and 'principal_point' in params['intrinsics']:
                     cam['principal_point'] = params['intrinsics']['principal_point']
 
-                # Matrices SOFA si présentes
+                # SOFA matrices if present
                 if "all_camera_attributes" in data:
                     attrs = data["all_camera_attributes"]
                     if 'projectionMatrix' in attrs:
@@ -142,22 +142,22 @@ class NPZDirectProjector:
                         cam['modelview_matrix'] = np.array(params['modelViewMatrix'], dtype=np.float64).reshape(4, 4)
 
                 pos, ori = cam['position'], cam['orientation']
-                print(f"   Position extraite: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
-                print(f"   Quaternion extrait: [{ori[0]:.6f}, {ori[1]:.6f}, {ori[2]:.6f}, {ori[3]:.6f}]")
+                print(f"   Extracted position: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
+                print(f"   Extracted quaternion: [{ori[0]:.6f}, {ori[1]:.6f}, {ori[2]:.6f}, {ori[3]:.6f}]")
                 print(f"   FOV: {cam['field_of_view']:.1f}°")
-                print(f"   Viewport REEL: {cam['viewport_width']}x{cam['viewport_height']}")
+                print(f"   REAL Viewport: {cam['viewport_width']}x{cam['viewport_height']}")
                 if cam['projection_matrix'] is not None:
-                    print("   Matrice projection SOFA: disponible (4x4) - UTILISÉE DIRECTEMENT")
+                    print("   SOFA projection matrix: available (4x4) - USED DIRECTLY")
                 if cam['modelview_matrix'] is not None:
-                    print("   Matrice ModelView SOFA: disponible (4x4) - UTILISÉE DIRECTEMENT")
+                    print("   SOFA ModelView matrix: available (4x4) - USED DIRECTLY")
 
                 return cam
 
             except Exception as e:
-                print(f"Erreur lecture {camera_params_file}: {e}")
+                print(f"Error reading {camera_params_file}: {e}")
 
-        # Fallback par défaut
-        print("   Utilisation paramètres par défaut SOFA InteractiveCamera")
+        # Default fallback
+        print("   Using default SOFA InteractiveCamera parameters")
         return {
             'position': np.array([-81.2953, -21.7954, 112.397], dtype=np.float64),
             'orientation': np.array([0.0778814, -0.314528, 0.0648681, 0.943821], dtype=np.float64),
@@ -176,7 +176,7 @@ class NPZDirectProjector:
         }
 
     def _find_latest_camera_params(self, base_dir="simulation_output"):
-        """Trouve le fichier de paramètres caméra le plus récent (recherche récursive)."""
+        """Find the most recent camera params file (recursive search)."""
         if base_dir is None or not os.path.exists(base_dir):
             return None
         camera_files = []
@@ -187,19 +187,19 @@ class NPZDirectProjector:
         if not camera_files:
             return None
         latest_file = max(camera_files, key=lambda f: os.path.getmtime(f))
-        print(f"   Fichier auto-détecté: {os.path.basename(latest_file)}")
+        print(f"   Auto-detected file: {os.path.basename(latest_file)}")
         return latest_file
 
     def _prepare_run_context(self, run_dir):
-        """Ajuste la caméra et le viewport pour le dossier de run donné."""
+        """Adjust camera and viewport for the given run folder."""
         cam_file = self._find_latest_camera_params(run_dir) or self._find_latest_camera_params("simulation_output")
         if cam_file is not None:
             self.camera_params = self._load_real_camera_params(cam_file)
-        # Réinitialise le viewport depuis la caméra
+        # Reset viewport from camera
         self.screen_width = int(self.camera_params['viewport_width'])
         self.screen_height = int(self.camera_params['viewport_height'])
         self.resolution_source = 'camera'
-        # Override éventuel depuis les images du run
+        # Optional override from run images
         img_res = self._detect_dataset_image_resolution(run_dir)
         if img_res is not None:
             iw, ih = img_res
@@ -208,12 +208,12 @@ class NPZDirectProjector:
                 self.resolution_source = 'image'
         # Log
         p = self.camera_params['position']; q = self.camera_params['orientation']
-        print(f"   Contexte run: {os.path.relpath(run_dir)}")
+        print(f"   Run context: {os.path.relpath(run_dir)}")
         print(f"     Viewport: {self.screen_width}x{self.screen_height} (source: {self.resolution_source})")
-    # -------------------- Math caméra --------------------
+    # -------------------- Camera math --------------------
 
     def _quaternion_to_rotation_matrix(self, q):
-        """Convertit quaternion en matrice de rotation (normalisé)"""
+        """Convert quaternion to rotation matrix (normalized)"""
         q = np.asarray(q, dtype=np.float64)
         n = np.linalg.norm(q)
         if n > 0:
@@ -226,7 +226,7 @@ class NPZDirectProjector:
         ], dtype=np.float64)
 
     def _create_view_matrix_from_lookat(self, eye, target, up=None):
-        """Crée une matrice view avec lookAt"""
+        """Create a view matrix with lookAt"""
         if up is None:
             up = np.array([0, 0, 1], dtype=np.float64)
         eye = np.asarray(eye, dtype=np.float64)
@@ -257,7 +257,7 @@ class NPZDirectProjector:
         return view
 
     def _create_view_matrix_from_quaternion(self, position, orientation):
-        """Crée matrice View depuis quaternion"""
+        """Create View matrix from quaternion"""
         R = self._quaternion_to_rotation_matrix(orientation)
         forward = -R[:, 2]
         up = R[:, 1]
@@ -272,7 +272,7 @@ class NPZDirectProjector:
         return view
 
     def _intrinsic_to_projection_matrix(self, K, near, far):
-        """Convertit matrice intrinsèque en matrice de projection OpenGL"""
+        """Convert intrinsic matrix to OpenGL projection matrix"""
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
         width, height = self.screen_width, self.screen_height
@@ -286,7 +286,7 @@ class NPZDirectProjector:
         return proj
 
     def _create_projection_matrices(self):
-        """Construit view/proj — utilise SOFA si dispo, sinon fallback."""
+        """Build view/proj — use SOFA if available, otherwise fallback."""
         pos = self.camera_params['position']
         fov = self.camera_params['field_of_view']
         near = self.camera_params['znear']
@@ -296,9 +296,9 @@ class NPZDirectProjector:
             self.camera_params['modelview_matrix'] is not None):
             proj_matrix = self.camera_params['projection_matrix'].copy()
             view_matrix = self.camera_params['modelview_matrix'].copy()
-            print("   Utilisation MATRICES SOFA PRÉ-CALCULÉES (projection + modelview).")
+            print("   Using PRE-COMPUTED SOFA MATRICES (projection + modelview).")
         else:
-            print("   Fallback: Calcul matrices manuellement...")
+            print("   Fallback: computing matrices manually...")
             if self.camera_params['intrinsic_matrix'] is not None:
                 K = self.camera_params['intrinsic_matrix'].copy()
                 ow, oh = self.camera_params['viewport_width'], self.camera_params['viewport_height']
@@ -306,7 +306,7 @@ class NPZDirectProjector:
                 K[0, 0] *= sx; K[1, 1] *= sy
                 K[0, 2] *= sx; K[1, 2] *= sy
                 proj_matrix = self._intrinsic_to_projection_matrix(K, near, far)
-                print(f"      Intrinsèque mise à l’échelle: {ow}x{oh} → {self.screen_width}x{self.screen_height}")
+                print(f"      Scaled intrinsics: {ow}x{oh} → {self.screen_width}x{self.screen_height}")
             else:
                 aspect = self.screen_width / self.screen_height
                 f = 1.0 / np.tan(np.radians(fov) / 2.0)
@@ -316,7 +316,7 @@ class NPZDirectProjector:
                     [0, 0, (far+near)/(near-far), (2*far*near)/(near-far)],
                     [0, 0, -1, 0]
                 ], dtype=np.float64)
-                print(f"      Projection depuis FOV: {fov:.1f}°")
+                print(f"      Projection from FOV: {fov:.1f}°")
 
             if self.camera_params.get('lookat') is not None:
                 target = self.camera_params['lookat']
@@ -329,10 +329,10 @@ class NPZDirectProjector:
 
         return view_matrix, proj_matrix
 
-    # -------------------- Projection vectorisée --------------------
+    # -------------------- Vectorized projection --------------------
 
     def project_vertices_to_pixels(self, vertices_3d, view_matrix=None, proj_matrix=None):
-        """Projection 3D→Pixel (vectorisée)"""
+        """3D→Pixel projection (vectorized)"""
         if view_matrix is None or proj_matrix is None:
             view_matrix, proj_matrix = self._create_projection_matrices()
 
@@ -353,9 +353,9 @@ class NPZDirectProjector:
         y = (1.0 - ndc[:, 1]) * 0.5 * self.screen_height
         z = ndc[:, 2]
 
-        # Bornes strictes (évite le "pixel de bord" fantôme)
+        # Strict bounds (avoids phantom edge pixel)
         in_screen = (x >= 0.0) & (x < self.screen_width) & (y >= 0.0) & (y < self.screen_height)
-        in_front = Vview[:, 2] < -0.1  # caméra OpenGL regardant -Z
+        in_front = Vview[:, 2] < -0.1  # OpenGL camera looking down -Z
 
         pixel_coords = np.column_stack([
             np.nan_to_num(x, nan=0.0), np.nan_to_num(y, nan=0.0)
@@ -365,13 +365,13 @@ class NPZDirectProjector:
 
         return pixel_coords, visibility_mask.astype(bool), depths
 
-    # -------------------- I/O NPZ --------------------
+    # -------------------- NPZ I/O --------------------
 
     def find_npz_files(self, search_pattern="brain_surface_*.npz"):
-        """Trouve tous les fichiers NPZ (parcours récursif de simulation_output, ignore déjà projetés)."""
+        """Find all NPZ files (recursive walk of simulation_output, skip already projected)."""
         export_root = "simulation_output"
         if not os.path.exists(export_root):
-            print(f"Dossier {export_root} introuvable")
+            print(f"Folder {export_root} not found")
             return []
         files = []
         for root, _dirs, filenames in os.walk(export_root):
@@ -379,10 +379,10 @@ class NPZDirectProjector:
                 if fnmatch.fnmatch(fn, search_pattern) and ("_projected_" not in fn):
                     files.append(os.path.join(root, fn))
         if not files:
-            print(f"Aucun fichier NPZ trouvé avec pattern: {search_pattern}")
+            print(f"No NPZ files found with pattern: {search_pattern}")
             return []
         files.sort()
-        print("Fichiers NPZ détectés:")
+        print("Detected NPZ files:")
         for i, npz_file in enumerate(files):
             size_mb = os.path.getsize(npz_file) / 1024 / 1024
             relp = os.path.relpath(npz_file, start=export_root)
@@ -390,9 +390,9 @@ class NPZDirectProjector:
         return files
 
     def _save_incremental_backup(self, output_file, data_dict, frame_idx):
-        """Sauvegarde incrémentale sur le même fichier"""
+        """Incremental save to the same file"""
         np.savez_compressed(output_file, **data_dict)
-        print(f"      Sauvegarde incrémentale frame {frame_idx}: {os.path.basename(output_file)}")
+        print(f"      Incremental save frame {frame_idx}: {os.path.basename(output_file)}")
         return output_file
 
     # -------------------- Pixel-space rasterization --------------------
@@ -471,24 +471,24 @@ class NPZDirectProjector:
         force_map[fill] = force_map[fy, fx]
         return force_map
 
-    # -------------------- Traitement principal --------------------
+    # -------------------- Main processing --------------------
 
     def process_npz_file(self, npz_file):
-        """Traite un fichier NPZ avec projection et sauvegarde incrémentale"""
-        print(f"\nTRAITEMENT NPZ: {os.path.basename(npz_file)}")
+        """Process an NPZ file with projection and incremental saving"""
+        print(f"\nNPZ PROCESSING: {os.path.basename(npz_file)}")
         print("=" * 60)
         try:
-            # Préparation du contexte par run (caméra + viewport + résolution images)
+            # Prepare per-run context (camera + viewport + image resolution)
             run_dir = os.path.dirname(npz_file)
             self._prepare_run_context(run_dir)
 
             data = np.load(npz_file)
-            print(f"   Fichier NPZ chargé: {os.path.basename(npz_file)}")
+            print(f"   NPZ file loaded: {os.path.basename(npz_file)}")
 
             required_keys = ['frames']
             missing = [k for k in required_keys if k not in data.files]
             if missing:
-                print(f"   Clés manquantes: {missing}")
+                print(f"   Missing keys: {missing}")
                 return None
 
             frames = data['frames']
@@ -519,7 +519,7 @@ class NPZDirectProjector:
                             meta_data = json.load(mf)
                         image_every = int(meta_data.get('image_every', 1))
                         if image_every > 1:
-                            print(f"   image_every={image_every} lu depuis {os.path.basename(mc)}")
+                            print(f"   image_every={image_every} read from {os.path.basename(mc)}")
                         break
                     except Exception:
                         pass
@@ -537,25 +537,25 @@ class NPZDirectProjector:
                     if len(nums) >= 2:
                         gaps = [nums[i+1] - nums[i] for i in range(min(10, len(nums)-1))]
                         image_every = int(round(sum(gaps) / len(gaps)))
-                        print(f"   image_every={image_every} déduit depuis noms de fichiers ({len(nums)} images dans plage NPZ)")
+                        print(f"   image_every={image_every} inferred from filenames ({len(nums)} images in NPZ range)")
 
             image_frame_indices = np.arange(0, n_frames, image_every, dtype=np.int32)
 
-            print("   Données extraites:")
+            print("   Extracted data:")
             print(f"     Frames: {n_frames}")
-            print(f"     Vertices par frame: {n_vertices}")
-            print(f"     Rest positions: {'Disponible' if rest_positions is not None else 'Non disponible'}")
-            print(f"     Displacements: {'Disponible' if displacements is not None else 'Non disponible'}")
-            print(f"     Times: {'Disponible' if times is not None else 'Non disponible'}")
-            print(f"     Surface external forces: {'Disponible' if surface_external_forces is not None else 'Non disponible'}")
-            print(f"     Images attendues: {len(image_frame_indices)} (every {image_every} frames)")
+            print(f"     Vertices per frame: {n_vertices}")
+            print(f"     Rest positions: {'Available' if rest_positions is not None else 'Not available'}")
+            print(f"     Displacements: {'Available' if displacements is not None else 'Not available'}")
+            print(f"     Times: {'Available' if times is not None else 'Not available'}")
+            print(f"     Surface external forces: {'Available' if surface_external_forces is not None else 'Not available'}")
+            print(f"     Expected images: {len(image_frame_indices)} (every {image_every} frames)")
 
-            # Buffers de sortie
+            # Output buffers
             projected_pixels = np.zeros((n_frames, n_vertices, 2), dtype=np.float32)
             visibility_masks = np.zeros((n_frames, n_vertices), dtype=bool)
             depth_values = np.zeros((n_frames, n_vertices), dtype=np.float32)
 
-            # Fichier de sortie (miroir du sous-dossier de run sous projected_npz)
+            # Output file (mirror run subfolder under projected_npz)
             output_filename = os.path.basename(npz_file).replace('.npz', f'_projected_{self.session_id}.npz')
             export_root_abs = os.path.abspath("simulation_output")
             npz_dir_abs = os.path.abspath(run_dir)
@@ -569,10 +569,10 @@ class NPZDirectProjector:
             os.makedirs(output_base, exist_ok=True)
             output_file = os.path.join(output_base, output_filename)
 
-            print(f"   Pré-calcul matrices view/proj...")
+            print(f"   Pre-computing view/proj matrices...")
             view_matrix, proj_matrix = self._create_projection_matrices()
 
-            print(f"   Début projection de {n_frames} frames...")
+            print(f"   Starting projection of {n_frames} frames...")
             for frame_idx in range(n_frames):
                 frame_vertices = frames[frame_idx]
                 pixel_coords, visibility_mask, depths = self.project_vertices_to_pixels(
@@ -598,11 +598,11 @@ class NPZDirectProjector:
                     vis_rate   = (vis_count / len(visibility_mask) * 100.0) if len(visibility_mask) else 0.0
                     n_covered  = int(np.sum(cov))
                     total_pix  = out_H * out_W
-                    print(f"      Frame {frame_idx+1}/{n_frames}: {vis_count}/{len(visibility_mask)} vertices visible ({vis_rate:.1f}%), "
+                    print(f"      Frame {frame_idx+1}/{n_frames}: {vis_count}/{len(visibility_mask)} visible vertices ({vis_rate:.1f}%), "
                           f"{n_covered}/{total_pix} pixels covered ({n_covered/total_pix*100:.1f}%)")
 
                 if (frame_idx + 1) % self.backup_interval == 0:
-                    print(f"   Sauvegarde incrémentale à la frame {frame_idx+1}...")
+                    print(f"   Incremental save at frame {frame_idx+1}...")
                     current_data = {
                         'frames': frames[:frame_idx+1],
                         'projected_pixels': projected_pixels[:frame_idx+1],
@@ -620,7 +620,7 @@ class NPZDirectProjector:
                     current_data['image_frame_indices'] = image_frame_indices[image_frame_indices <= frame_idx]
                     self._save_incremental_backup(output_file, current_data, frame_idx+1)
 
-            print("   Sauvegarde finale...")
+            print("   Final save...")
             final_data = {
                 'frames': frames,
                 'projected_pixels': projected_pixels,
@@ -647,12 +647,12 @@ class NPZDirectProjector:
             overall_visibility = (total_visible / total_vertices * 100.0) if total_vertices else 0.0
             size_mb = os.path.getsize(output_file) / 1024 / 1024
 
-            print("   Projection terminée:")
-            print(f"     Fichier final: {output_filename}")
-            print(f"     Taille: {size_mb:.1f} MB")
+            print("   Projection complete:")
+            print(f"     Final file: {output_filename}")
+            print(f"     Size: {size_mb:.1f} MB")
             print(f"     Total vertices: {total_vertices:,}")
-            print(f"     Vertices visibles: {total_visible:,} ({overall_visibility:.1f}%)")
-            print(f"     Nouvelles clés NPZ: projected_pixels, visibility_masks, depth_values")
+            print(f"     Visible vertices: {total_visible:,} ({overall_visibility:.1f}%)")
+            print(f"     New NPZ keys: projected_pixels, visibility_masks, depth_values")
 
             metadata = {
                 'session_id': self.session_id,
@@ -706,7 +706,7 @@ class NPZDirectProjector:
             meta_file = output_file.replace('.npz', '_metadata.json')
             with open(meta_file, 'w') as f:
                 json.dump(metadata, f, indent=2)
-            print(f"   Métadonnées sauvées: {os.path.basename(meta_file)}")
+            print(f"   Metadata saved: {os.path.basename(meta_file)}")
 
             data.close()
             return {
@@ -721,74 +721,74 @@ class NPZDirectProjector:
             }
 
         except Exception as e:
-            print(f"   Erreur traitement NPZ: {e}")
+            print(f"   NPZ processing error: {e}")
             return None
 
 # -------------------- CLI --------------------
 
 def main():
-    """Menu principal pour projection directe NPZ"""
+    """Main menu for direct NPZ projection"""
     print("NPZ DIRECT PROJECTOR")
     print("=" * 60)
-    print("Projection 3D→Pixel directe sur fichiers NPZ avec sauvegarde incrémentale\n")
+    print("Direct 3D→Pixel projection on NPZ files with incremental saving\n")
 
     # Configuration backup interval
     backup_interval = 50
     try:
-        user_interval = input(f"Interval de sauvegarde (défaut {backup_interval} frames): ").strip()
+        user_interval = input(f"Save interval (default {backup_interval} frames): ").strip()
         if user_interval:
             backup_interval = int(user_interval)
     except ValueError:
-        print("Utilisation valeur par défaut")
+        print("Using default value")
 
     projector = NPZDirectProjector(backup_interval=backup_interval)
 
-    print("Options disponibles:")
-    print("  1. Traiter tous les fichiers NPZ automatiquement")
-    print("  2. Traiter avec pattern personnalisé")
-    print("  3. Traiter un seul fichier NPZ spécifique")
-    print("  4. Quitter")
+    print("Available options:")
+    print("  1. Process all NPZ files automatically")
+    print("  2. Process with custom pattern")
+    print("  3. Process a single specific NPZ file")
+    print("  4. Quit")
 
     try:
-        choice = int(input("\nVotre choix (1-4): "))
+        choice = int(input("\nYour choice (1-4): "))
         if choice == 1:
             npz_files = projector.find_npz_files()
             for npz_file in npz_files:
                 projector.process_npz_file(npz_file)
 
         elif choice == 2:
-            pattern = input("Pattern de recherche (ex: brain_surface_*.npz): ").strip()
+            pattern = input("Search pattern (e.g. brain_surface_*.npz): ").strip()
             if pattern:
                 npz_files = projector.find_npz_files(pattern)
                 for npz_file in npz_files:
                     projector.process_npz_file(npz_file)
             else:
-                print("Pattern vide")
+                print("Empty pattern")
 
         elif choice == 3:
             npz_files = projector.find_npz_files()
             if npz_files:
-                print("\nFichiers NPZ disponibles:")
+                print("\nAvailable NPZ files:")
                 for i, npz_file in enumerate(npz_files):
                     print(f"  {i+1}. {os.path.basename(npz_file)}")
-                idx = int(input(f"\nChoisir fichier (1-{len(npz_files)}): ")) - 1
+                idx = int(input(f"\nChoose file (1-{len(npz_files)}): ")) - 1
                 if 0 <= idx < len(npz_files):
                     projector.process_npz_file(npz_files[idx])
                 else:
-                    print("Choix invalide")
+                    print("Invalid choice")
             else:
-                print("Aucun fichier NPZ trouvé")
+                print("No NPZ files found")
 
         elif choice == 4:
-            print("Au revoir!")
+            print("Goodbye!")
 
         else:
-            print("Choix invalide")
+            print("Invalid choice")
 
     except ValueError:
-        print("Choix invalide")
+        print("Invalid choice")
     except KeyboardInterrupt:
-        print("\nInterrompu par l'utilisateur")
+        print("\nInterrupted by user")
 
 if __name__ == "__main__":
     main()
